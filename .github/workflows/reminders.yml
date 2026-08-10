@@ -1,0 +1,54 @@
+name: Bluesky event reminders
+
+on:
+  schedule:
+    # Every 30 min. Events get announced somewhere in the 45-75 min
+    # window before they start; the exact minute doesn't matter.
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print posts instead of publishing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bsky-reminders
+  cancel-in-progress: false
+
+env:
+  # Public calendar, so this isn't a secret.
+  ICS_URL: "https://calendar.google.com/calendar/ical/02e772ffa8b579981dcecb0da5a0a27cb5bd929759d737607e38910a71243d46%40group.calendar.google.com/public/basic.ics"
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Post reminders
+        env:
+          BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
+          BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: python post_reminders.py
+
+      - name: Commit state
+        run: |
+          if [[ -n "$(git status --porcelain state.json)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add state.json
+            git commit -m "chore: record posted reminders"
+            git push
+          fi
