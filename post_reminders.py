@@ -130,16 +130,18 @@ def truncate(text, limit):
     return out.rstrip() + "\u2026"
 
 
-def build_post_text(event):
+def build_post_text(event, start=None):
     parts = ["Happening today in 1 hour! \u2728"]
-    description = strip_html(field(event, "DESCRIPTION"))
-    location = field(event, "LOCATION")
-    if description:
-        parts.append(description)
-    if location:
-        parts.append(location)
-    return truncate("\n\n".join(parts), MAX_GRAPHEMES)
 
+    location = field(event, "LOCATION")
+    if location:
+        parts.append(f"Location: {location}")
+
+    description = strip_html(field(event, "DESCRIPTION"))
+    if description:
+        parts.append(f"Tag: {description}")
+
+    return truncate("\n\n".join(parts), MAX_GRAPHEMES)
 
 def detect_links(text):
     """Without facets, URLs render as inert plain text."""
