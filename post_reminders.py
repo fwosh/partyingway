@@ -131,17 +131,20 @@ def truncate(text, limit):
 
 
 def build_post_text(event, start=None):
-    parts = ["Happening today in 1 hour! \u2728"]
+    details = []
 
     location = field(event, "LOCATION")
     if location:
-        parts.append(f"Location: {location}")
+        details.append(f"Location: {location}")
 
     description = strip_html(field(event, "DESCRIPTION"))
     if description:
-        parts.append(f"Tag: {description}")
+        details.append(f"Tag: {description}")
 
-    return truncate("\n\n".join(parts), MAX_GRAPHEMES)
+    text = "Happening today in 1 hour! \u2728"
+    if details:
+        text += "\n\n" + "\n".join(details)
+    return truncate(text, MAX_GRAPHEMES)
 
 def detect_links(text):
     """Without facets, URLs render as inert plain text."""
