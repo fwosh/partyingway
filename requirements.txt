@@ -1,3 +1,4 @@
 icalendar>=6.0
 recurring-ical-events>=3.0
+regex>=2024.5.15
 requests>=2.31
