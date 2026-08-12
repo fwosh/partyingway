@@ -12,12 +12,12 @@ import json
 import os
 import re
 import sys
-import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import icalendar
 import recurring_ical_events
+import regex
 import requests
 
 ICS_URL = os.environ["ICS_URL"]
@@ -29,8 +29,10 @@ DRY_RUN = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
 
 STATE_PATH = Path(__file__).parent / "state.json"
 PDS = "https://bsky.social"
+APPVIEW = "https://public.api.bsky.app"
 MAX_GRAPHEMES = 300
 RETENTION_DAYS = 30
+
 
 
 # ---------- state ----------
@@ -113,50 +115,136 @@ def strip_html(text):
 
 
 def grapheme_len(text):
-    """Bluesky counts graphemes, not codepoints. Dropping combining marks
-    approximates this closely enough for emoji and accented text."""
-    return len([c for c in unicodedata.normalize("NFC", text)
-                if not unicodedata.combining(c)])
+    r"""Bluesky's 300 limit counts grapheme clusters, so an emoji with a
+    variation selector is 1, not 2. \X matches a full cluster."""
+    return len(regex.findall(r"\X", text))
 
 
 def truncate(text, limit):
     if grapheme_len(text) <= limit:
         return text
-    out = ""
-    for char in text:
-        if grapheme_len(out + char) > limit - 1:
-            break
-        out += char
-    return out.rstrip() + "\u2026"
+    clusters = regex.findall(r"\X", text)
+    return "".join(clusters[: limit - 1]).rstrip() + "\u2026"
 
 
-def build_post_text(event, start=None):
+def build_post_text(event, quoted=False):
+    """The post format lives here. An empty field is skipped rather than
+    leaving a bare label behind. When `quoted` is true the Location URL is
+    being shown as a quote-post embed, so it's left out of the text."""
     details = []
 
     location = field(event, "LOCATION")
-    if location:
-        details.append(f"Location: {location}")
+    if location and not quoted:
+        details.append(f"Post: {location}")
 
     description = strip_html(field(event, "DESCRIPTION"))
     if description:
-        details.append(f"Tag: {description}")
+        details.append(description)
 
-    text = "Happening today in 1 hour! \u2728"
+    text = "Happening today within 1 hour! \u2728"
     if details:
         text += "\n\n" + "\n".join(details)
     return truncate(text, MAX_GRAPHEMES)
 
-def detect_links(text):
-    """Without facets, URLs render as inert plain text."""
-    facets = []
-    for match in re.finditer(r"https?://[^\s\]\)]+", text):
-        url = match.group(0).rstrip(".,;:!?")
-        start = len(text[: match.start()].encode("utf-8"))
+
+MD_LINK_RE = regex.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+BARE_URL_RE = regex.compile(r"https?://[^\s\]\)]+")
+HASHTAG_RE = regex.compile(r"(?<![\w/])#(\w{1,64})")
+
+
+def resolve_markdown_links(text):
+    """Turn [label](url) into `label` plus a link span, so the post shows a
+    clean label instead of a raw URL. Returns (text, [(start, end, url)])."""
+    out, spans, cursor = [], [], 0
+    for match in MD_LINK_RE.finditer(text):
+        out.append(text[cursor:match.start()])
+        label_start = sum(len(piece) for piece in out)
+        out.append(match.group(1))
+        spans.append((label_start, label_start + len(match.group(1)), match.group(2)))
+        cursor = match.end()
+    out.append(text[cursor:])
+    return "".join(out), spans
+
+
+def build_facets(text, link_spans):
+    """Byte offsets, not character offsets - the AT Protocol counts UTF-8."""
+    def byte_offset(char_index):
+        return len(text[:char_index].encode("utf-8"))
+
+    facets, claimed = [], []
+
+    def add(start, end, feature):
         facets.append({
-            "index": {"byteStart": start, "byteEnd": start + len(url.encode("utf-8"))},
-            "features": [{"$type": "app.bsky.richtext.facet#link", "uri": url}],
+            "index": {"byteStart": byte_offset(start), "byteEnd": byte_offset(end)},
+            "features": [feature],
         })
+        claimed.append((start, end))
+
+    for start, end, url in link_spans:
+        add(start, end, {"$type": "app.bsky.richtext.facet#link", "uri": url})
+
+    for match in BARE_URL_RE.finditer(text):
+        if any(s <= match.start() < e for s, e in claimed):
+            continue
+        url = match.group(0).rstrip(".,;:!?")
+        add(match.start(), match.start() + len(url),
+            {"$type": "app.bsky.richtext.facet#link", "uri": url})
+
+    for match in HASHTAG_RE.finditer(text):
+        if any(s <= match.start() < e for s, e in claimed):
+            continue  # don't tag a fragment inside a URL
+        add(match.start(), match.end(),
+            {"$type": "app.bsky.richtext.facet#tag", "tag": match.group(1)})
+
+    facets.sort(key=lambda f: f["index"]["byteStart"])
     return facets
+
+
+# ---------- quote embeds ----------
+
+BSKY_POST_URL_RE = regex.compile(
+    r"https?://(?:www\.)?(?:bsky\.app|staging\.bsky\.app)"
+    r"/profile/([^/\s]+)/post/([A-Za-z0-9._~-]+)"
+)
+
+
+def resolve_quote(url):
+    """Turn a bsky.app post URL into the {uri, cid} pair an embed needs.
+
+    Returns None if the URL isn't a Bluesky post or the post can't be
+    fetched (deleted, blocked, private) - the caller then falls back to
+    showing the plain link.
+    """
+    match = BSKY_POST_URL_RE.search(url or "")
+    if not match:
+        return None
+    actor, rkey = match.group(1), match.group(2)
+
+    try:
+        did = actor
+        if not did.startswith("did:"):
+            resp = requests.get(
+                f"{APPVIEW}/xrpc/com.atproto.identity.resolveHandle",
+                params={"handle": actor}, timeout=20,
+            )
+            resp.raise_for_status()
+            did = resp.json()["did"]
+
+        at_uri = f"at://{did}/app.bsky.feed.post/{rkey}"
+        resp = requests.get(
+            f"{APPVIEW}/xrpc/app.bsky.feed.getPosts",
+            params={"uris": at_uri}, timeout=20,
+        )
+        resp.raise_for_status()
+        posts = resp.json().get("posts", [])
+        if not posts:
+            return None
+        # The cid pins a specific version of the record; without it the
+        # embed is rejected.
+        return {"uri": posts[0]["uri"], "cid": posts[0]["cid"]}
+    except (requests.RequestException, KeyError, ValueError) as exc:
+        print(f"  could not resolve quote {url}: {exc}")
+        return None
 
 
 # ---------- bluesky ----------
@@ -171,16 +259,17 @@ def create_session():
     return resp.json()
 
 
-def create_post(session, text):
+def create_post(session, text, facets, embed=None):
     record = {
         "$type": "app.bsky.feed.post",
         "text": text,
         "createdAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "langs": ["en"],
     }
-    facets = detect_links(text)
     if facets:
         record["facets"] = facets
+    if embed:
+        record["embed"] = embed
 
     resp = requests.post(
         f"{PDS}/xrpc/com.atproto.repo.createRecord",
@@ -223,18 +312,26 @@ def main():
             continue
 
         summary = field(event, "SUMMARY") or "(untitled)"
-        text = build_post_text(event)
+        quote = resolve_quote(field(event, "LOCATION"))
+        embed = {"$type": "app.bsky.embed.record", "record": quote} if quote else None
+
+        text, link_spans = resolve_markdown_links(
+            build_post_text(event, quoted=bool(quote))
+        )
+        facets = build_facets(text, link_spans)
         print(f"[{minutes_out:.0f} min out] {summary}")
 
         if DRY_RUN:
             print("--- would post ---")
             print(text)
-            print("------------------")
+            print(f"--- {grapheme_len(text)}/{MAX_GRAPHEMES} graphemes, "
+                  f"{len(facets)} facet(s), "
+                  f"{'quoting ' + quote['uri'] if quote else 'no embed'} ---")
             continue
 
         if session is None:
             session = create_session()
-        create_post(session, text)
+        create_post(session, text, facets, embed)
         state[key] = now.isoformat()
         posted_any = True
         print(f"posted: {summary}")
