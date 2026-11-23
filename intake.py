@@ -125,22 +125,22 @@ EXTRACT_TOOL = {
         "properties": {
             "is_art_party": {"type": "boolean",
                 "description": "False if the post isn't announcing an art party."},
-            "tag": {"type": ["string", "null"],
-                "description": "Event hashtag including the leading #. Null if none."},
-            "address": {"type": ["string", "null"],
+            "tag": {"type": "string",
+                "description": "Event hashtag including the leading #. Empty string if none."},
+            "address": {"type": "string",
                 "description": ("FFXIV location as 'Datacenter, World, District, Ward, "
-                                "Plot'. Keep apartment/subdivision detail. Null if absent.")},
-            "date": {"type": ["string", "null"],
-                "description": "Event date as YYYY-MM-DD in Pacific. Null if undeterminable."},
-            "time_as_written": {"type": ["string", "null"],
+                                "Plot'. Keep apartment/subdivision detail. Empty if absent.")},
+            "date": {"type": "string",
+                "description": "Event date as YYYY-MM-DD in Pacific. Empty if undeterminable."},
+            "time_as_written": {"type": "string",
                 "description": "Start time EXACTLY as worded, e.g. '7pm EST', '19:00 ST'."},
-            "source_timezone": {"type": ["string", "null"],
+            "source_timezone": {"type": "string",
                 "description": ("IANA zone of the written time, or 'UTC' for Server Time. "
-                                "Null if the post never says - do NOT guess.")},
-            "start_pt": {"type": ["string", "null"],
-                "description": "Start converted to Pacific, 24h HH:MM. Null if zone unknown."},
-            "end_pt": {"type": ["string", "null"],
-                "description": "End time in Pacific, 24h HH:MM. Null if no end time given."},
+                                "Empty if the post never says - do NOT guess.")},
+            "start_pt": {"type": "string",
+                "description": "Start converted to Pacific, 24h HH:MM. Empty if zone unknown."},
+            "end_pt": {"type": "string",
+                "description": "End time in Pacific, 24h HH:MM. Empty if no end time given."},
             "notes": {"type": "string",
                 "description": ("One or two sentences for the reviewer: how you read the "
                                 "timezone, what was missing, and any disagreement between "
@@ -176,8 +176,9 @@ wrong. Rules:
 - "ST" or "Server Time" means UTC. Always.
 - A named zone (EST, CST, PDT, BST, JST...) is what it says. Mind the \
 daylight-saving variant that applies on the event's date, not today's.
-- If the time has NO zone at all, set source_timezone and start_pt to null. \
-Do not assume the host's zone, do not assume Pacific. A human will resolve it.
+- If the time has NO zone at all, leave source_timezone and start_pt as \
+EMPTY STRINGS. Do not assume the host's zone, do not assume Pacific. A human \
+will resolve it.
 - Put the time exactly as worded in time_as_written, before any conversion, \
 so the reviewer can check your work.
 
@@ -185,7 +186,8 @@ DATES: "Saturday" or "Nov 30" with no year means the next future occurrence \
 relative to the current date below. If that lands more than 90 days out, say \
 so in notes.
 
-Never invent a detail that isn't present. A null is correct and useful; a \
+Never invent a detail that isn't present. Leave any field you cannot \
+determine as an empty string - that is correct and useful, whereas a \
 plausible guess is harmful, because it can pass review unnoticed.
 """
 
@@ -220,6 +222,9 @@ def parse_post(post):
               "messages": [{"role": "user", "content": content}]},
         timeout=120,
     )
+    if resp.status_code != 200:
+        # The body explains exactly what was wrong; raise_for_status() hides it.
+        print(f"    Anthropic API {resp.status_code}: {resp.text[:1500]}")
     resp.raise_for_status()
     payload = resp.json()
     usage = payload.get("usage", {})
