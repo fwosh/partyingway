@@ -36,6 +36,9 @@ DEFAULT_DURATION_HOURS = int(os.environ.get("DEFAULT_DURATION_HOURS", "3"))
 # The reminder reads the calendar, not the sheet, so archiving early is safe:
 # the row's only remaining job is to stop the mention being re-queued.
 ARCHIVE_AFTER_DAYS = int(os.environ.get("ARCHIVE_AFTER_DAYS", "14"))
+# Used only when a row's Zone cell is blank. Leave it unset and a row with no
+# timezone is reported rather than guessed at.
+DEFAULT_TIMEZONE = os.environ.get("DEFAULT_TIMEZONE", "").strip()
 DRY_RUN = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
 
 PDS = "https://bsky.social"
@@ -44,7 +47,7 @@ PACIFIC = ZoneInfo("America/Los_Angeles")
 BSKY_POST_URL_RE = re.compile(
     r"https?://(?:www\.)?bsky\.app/profile/([^/\s]+)/post/([A-Za-z0-9._~-]+)"
 )
-REQUIRED = ("Tag", "Date", "Start PT", "Address", "Link")
+REQUIRED = ("Tag", "Date", "Start", "Address", "Link")
 
 
 class RowProblem(Exception):
@@ -93,24 +96,51 @@ def as_time(value):
     return None
 
 
+def event_zone(row):
+    """The timezone the host stated their times in.
+
+    Times are stored exactly as the host gave them and handed to Google with
+    this zone attached, so Calendar does the converting - correctly, for
+    every viewer, with daylight saving handled for the event's own date.
+    """
+    name = clean(row["Zone"]) or DEFAULT_TIMEZONE
+    if not name:
+        raise RowProblem("needs zone (no timezone given and no default set)")
+    # Abbreviations like EST are real tzdata entries, but they're FIXED
+    # offsets with no daylight saving - an event in July would land an hour
+    # out. Insist on the Area/Location form, which tracks DST properly.
+    if name.upper() == "UTC":
+        name = "UTC"  # ZoneInfo is case-sensitive; "utc" would fail
+    if "/" not in name and name != "UTC":
+        raise RowProblem(f"{name!r} is an abbreviation, which ignores daylight "
+                         f"saving; use the Area/Location form "
+                         f"(America/New_York, not EST)")
+    try:
+        return name, ZoneInfo(name)
+    except Exception:
+        raise RowProblem(f"{name!r} isn't a timezone name "
+                         f"(expected something like America/New_York)")
+
+
 def parse_when(row):
     day = as_date(row["Date"])
     if day is None:
         raise RowProblem(f"couldn't read the date {clean(row['Date'])!r}")
 
-    start_time = as_time(row["Start PT"])
+    start_time = as_time(row["Start"])
     if start_time is None:
-        raise RowProblem(f"couldn't read the start time {clean(row['Start PT'])!r}")
+        raise RowProblem(f"couldn't read the start time {clean(row['Start'])!r}")
 
-    start = datetime.combine(day, start_time, tzinfo=PACIFIC)
-    end_time = as_time(row["End PT"]) if clean(row["End PT"]) else None
+    zone_name, zone = event_zone(row)
+    start = datetime.combine(day, start_time, tzinfo=zone)
+    end_time = as_time(row["End"]) if clean(row["End"]) else None
     if end_time is not None:
-        end = datetime.combine(day, end_time, tzinfo=PACIFIC)
+        end = datetime.combine(day, end_time, tzinfo=zone)
         if end <= start:
             end += timedelta(days=1)  # runs past midnight
     else:
         end = start + timedelta(hours=DEFAULT_DURATION_HOURS)
-    return start, end
+    return start, end, zone_name
 
 
 def check(row):
@@ -129,7 +159,7 @@ def hashtag_url(tag):
     return f"https://bsky.app/hashtag/{bare}" if bare else ""
 
 
-def to_calendar(row, start, end):
+def to_calendar(row, start, end, zone_name):
     """What post_reminders.py reads an hour before the event, so the shapes
     have to line up: Location becomes the quote-post embed, and Description
     becomes the reminder's body text once its HTML is stripped."""
@@ -149,8 +179,8 @@ def to_calendar(row, start, end):
         "summary": tag or "Art party",
         "location": clean(row["Link"]),
         "description": "\n".join(lines),
-        "start": {"dateTime": start.isoformat(), "timeZone": "America/Los_Angeles"},
-        "end": {"dateTime": end.isoformat(), "timeZone": "America/Los_Angeles"},
+        "start": {"dateTime": start.isoformat(), "timeZone": zone_name},
+        "end": {"dateTime": end.isoformat(), "timeZone": zone_name},
     }
     from google.oauth2 import service_account
     credentials = service_account.Credentials.from_service_account_info(
@@ -177,9 +207,10 @@ def to_responses_sheet(row, start, end, svc):
         "tag": clean(row["Tag"]),
         "link": clean(row["Link"]),
         "address": clean(row["Address"]),
-        "date": start.strftime("%Y-%m-%d"),
-        "start": start.strftime("%H:%M"),
-        "end": end.strftime("%H:%M"),
+        # The old form collected Pacific, so convert for this path only.
+        "date": start.astimezone(PACIFIC).strftime("%Y-%m-%d"),
+        "start": start.astimezone(PACIFIC).strftime("%H:%M"),
+        "end": end.astimezone(PACIFIC).strftime("%H:%M"),
     }
     tab = os.environ.get("RESPONSES_TAB", "Form Responses 1")
     svc.spreadsheets().values().append(
@@ -293,7 +324,7 @@ def main():
     for row in rows:
         label = f"row {row['_row']} ({clean(row['Tag']) or 'untagged'})"
         try:
-            start, end = check(row)
+            start, end, zone_name = check(row)
         except RowProblem as problem:
             print(f"  {label}: {problem}")
             if not DRY_RUN:
@@ -301,11 +332,13 @@ def main():
             continue
 
         if DRY_RUN:
-            print(f"  {label}: would publish {start:%a %b %d %H:%M} – {end:%H:%M} PT")
+            print(f"  {label}: would publish {start:%a %b %d %H:%M}–{end:%H:%M} "
+                  f"{zone_name} ({start.astimezone(PACIFIC):%H:%M} PT)")
             continue
 
         try:
-            where = (to_calendar(row, start, end) if PUBLISH_MODE == "calendar"
+            where = (to_calendar(row, start, end, zone_name)
+                     if PUBLISH_MODE == "calendar"
                      else to_responses_sheet(row, start, end, svc))
         except Exception as exc:  # leave it ticked so the next run retries
             print(f"  {label}: publish failed: {exc}")

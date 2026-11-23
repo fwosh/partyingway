@@ -25,14 +25,15 @@ COLUMNS = [
     "Status",       # B  written back by publish.py
     "Tag",          # C
     "Date",         # D  YYYY-MM-DD, Pacific
-    "Start PT",     # E  HH:MM
-    "End PT",       # F  HH:MM, optional
-    "As written",   # G  the time exactly as the post worded it
-    "Address",      # H  FFXIV location
+    "Start",        # E  HH:MM in the host's own timezone, NOT converted
+    "End",          # F  HH:MM, optional
+    "Zone",         # G  IANA zone those times are in
+    "As written",   # H  the time exactly as the post worded it
+    "Address",      # I  FFXIV location
     "Link",         # I  the post being advertised
     "Flyer",        # J  =IMAGE() so the graphic shows in the sheet
     "Check",        # K  blank unless the parser hit a real problem
-    "Source",       # L  AT-URI, the dedupe key
+    "Source",       # M  AT-URI, the dedupe key
     "Queued",       # M
 ]
 INDEX = {name: i for i, name in enumerate(COLUMNS)}

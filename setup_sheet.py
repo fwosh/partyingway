@@ -39,11 +39,14 @@ SKIPPED = rgb("#F3F4F6")   # not an event: present, but quiet
 LINK = rgb("#2563EB")
 
 WIDTHS = {  # pixels, by column name
-    "Approve": 80, "Status": 120, "Tag": 130, "Date": 100, "Start PT": 80,
-    "End PT": 80, "As written": 110, "Address": 250, "Link": 170,
+    "Approve": 80, "Status": 120, "Tag": 130, "Date": 100, "Start": 80,
+    "End": 80, "Zone": 150, "As written": 110, "Address": 250, "Link": 170,
     "Flyer": 240, "Check": 200, "Source": 60, "Queued": 120,
 }
-CENTRED = ("Approve", "Date", "Start PT", "End PT", "Queued")
+CENTRED = ("Approve", "Date", "Start", "End", "Queued")
+# Column names that were called something else in an earlier layout. Used
+# only to recognise an existing sheet so its data doesn't get shifted.
+RENAMED_FROM = {"Start PT": "Start", "End PT": "End"}
 ROW_HEIGHT = int(os.environ.get("FLYER_ROW_HEIGHT", "240"))
 HEADER_HEIGHT = 44
 FROZEN_COLUMNS = 3              # Approve, Status, Tag stay put when scrolling
@@ -69,6 +72,45 @@ def ensure_archive(svc, existing_titles):
         body={"values": [sheet.COLUMNS]},
     ).execute()
     print(f"created the '{sheet.ARCHIVE_TAB}' tab")
+
+
+def migrate_columns(svc, sid):
+    """Make an existing sheet's columns match sheet.COLUMNS.
+
+    Renames are harmless - the header gets overwritten anyway. A genuinely
+    NEW column has to be inserted at its proper index, or every column after
+    it shifts and the rows already on the sheet silently misalign: Source
+    would stop matching, dedupe would break, and posts could be queued twice.
+    """
+    resp = svc.spreadsheets().values().get(
+        spreadsheetId=sheet.spreadsheet_id(),
+        range=f"{sheet.TAB}!A1:1").execute()
+    header = (resp.get("values") or [[]])[0]
+    if not header:
+        return  # fresh sheet, nothing to preserve
+
+    header = [RENAMED_FROM.get(name, name) for name in header]
+    requests = []
+    for index, name in enumerate(sheet.COLUMNS):
+        if index < len(header) and header[index] == name:
+            continue
+        if name in header:
+            continue  # present, just in a different place; header write fixes it
+        requests.append({"insertDimension": {
+            "range": {"sheetId": sid, "dimension": "COLUMNS",
+                      "startIndex": index, "endIndex": index + 1},
+            "inheritFromBefore": False,
+        }})
+        header.insert(index, name)
+
+    if requests:
+        svc.spreadsheets().batchUpdate(
+            spreadsheetId=sheet.spreadsheet_id(),
+            body={"requests": requests}).execute()
+        added = [sheet.COLUMNS[r["insertDimension"]["range"]["startIndex"]]
+                 for r in requests]
+        print(f"inserted {len(requests)} new column(s): {', '.join(added)} "
+              f"- existing rows shifted to match")
 
 
 def find_tab(svc):
@@ -103,6 +145,8 @@ def main():
     grid = tab["properties"].get("gridProperties", {})
     total_columns = grid.get("columnCount", 26)
     n = len(sheet.COLUMNS)
+
+    migrate_columns(svc, sid)
 
     svc.spreadsheets().values().update(
         spreadsheetId=sheet.spreadsheet_id(),
@@ -225,13 +269,13 @@ def main():
             "fields": "userEnteredFormat.numberFormat",
         }},
         {"repeatCell": {
-            "range": column("Start PT"),
+            "range": column("Start"),
             "cell": {"userEnteredFormat": {
                 "numberFormat": {"type": "TIME", "pattern": "h:mm am/pm"}}},
             "fields": "userEnteredFormat.numberFormat",
         }},
         {"repeatCell": {
-            "range": column("End PT"),
+            "range": column("End"),
             "cell": {"userEnteredFormat": {
                 "numberFormat": {"type": "TIME", "pattern": "h:mm am/pm"}}},
             "fields": "userEnteredFormat.numberFormat",
@@ -267,9 +311,18 @@ def main():
     # --- colour rules -----------------------------------------------------
     # $L is Source. Every rule is gated on it so that empty rows, of which a
     # new sheet has a thousand, stay plain.
-    HAS_DATA = '$L2<>""'
+    def ref(name):
+        """$-prefixed cell reference for a column, by name.
+
+        Worked out from sheet.COLUMNS rather than written by hand, so
+        inserting a column can't silently point a rule at its neighbour.
+        """
+        return f"${chr(ord('A') + sheet.INDEX[name])}2"
+
+    HAS_DATA = f'{ref("Source")}<>""'
     # Still waiting on a reviewer: no status yet, or publish asked for a fix.
-    AWAITING = f'AND({HAS_DATA},OR($B2="",LEFT($B2,5)="needs"))'
+    AWAITING = (f'AND({HAS_DATA},OR({ref("Status")}="",'
+                f'LEFT({ref("Status")},5)="needs"))')
 
     def rule(index, ranges, formula, colour):
         return {"addConditionalFormatRule": {"index": index, "rule": {
@@ -283,18 +336,22 @@ def main():
 
     for index, ranges, formula, colour in [
         # Published first, so a finished row doesn't also light up amber.
-        (0, [data], f'=AND({HAS_DATA},REGEXMATCH($B2&"","^Posted"))', GREEN),
+        (0, [data],
+         f'=AND({HAS_DATA},REGEXMATCH({ref("Status")}&"","^Posted"))', GREEN),
         # Not an art party: kept so the mention is never re-parsed, but
         # greyed so it doesn't read as work waiting to be done.
-        (1, [data], f'=AND({HAS_DATA},$B2="Not an event")', SKIPPED),
-        (2, [column("Tag")], f'=AND({AWAITING},$C2="")', AMBER),
-        (3, [column("Date")], f'=AND({AWAITING},$D2="")', AMBER),
-        (4, [column("Start PT")], f'=AND({AWAITING},$E2="")', AMBER),
+        (1, [data], f'=AND({HAS_DATA},{ref("Status")}="Not an event")', SKIPPED),
+        (2, [column("Tag")], f'=AND({AWAITING},{ref("Tag")}="")', AMBER),
+        (3, [column("Date")], f'=AND({AWAITING},{ref("Date")}="")', AMBER),
+        (4, [column("Start")], f'=AND({AWAITING},{ref("Start")}="")', AMBER),
+        # No timezone means publish can't place the event on the calendar.
+        (5, [column("Zone")], f'=AND({AWAITING},{ref("Zone")}="")', AMBER),
         # Empty, or lacking the comma-separated shape of an FFXIV address.
-        (5, [column("Address")],
-         f'=AND({AWAITING},OR($H2="",LEN($H2)-LEN(SUBSTITUTE($H2,",",""))<3))',
+        (6, [column("Address")],
+         f'=AND({AWAITING},OR({ref("Address")}="",'
+         f'LEN({ref("Address")})-LEN(SUBSTITUTE({ref("Address")},",",""))<3))',
          AMBER),
-        (6, [column("Check")], f'=AND({AWAITING},$K2<>"")', AMBER),
+        (7, [column("Check")], f'=AND({AWAITING},{ref("Check")}<>"")', AMBER),
     ]:
         requests.append(rule(index, ranges, formula, colour))
 

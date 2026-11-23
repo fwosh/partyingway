@@ -145,13 +145,15 @@ EXTRACT_SCHEMA = {
                 "description": "Event date as YYYY-MM-DD in Pacific. Empty if undeterminable."},
             "time_as_written": {"type": "string",
                 "description": "Start time EXACTLY as worded, e.g. '7pm EST', '19:00 ST'."},
-            "source_timezone": {"type": "string",
-                "description": ("IANA zone of the written time, or 'UTC' for Server Time. "
-                                "Empty if the post never says - do NOT guess.")},
-            "start_pt": {"type": "string",
-                "description": "Start converted to Pacific, 24h HH:MM. Empty if zone unknown."},
-            "end_pt": {"type": "string",
-                "description": "End time in Pacific, 24h HH:MM. Empty if no end time given."},
+            "timezone": {"type": "string",
+                "description": ("IANA zone the stated times are in, e.g. 'America/New_York'. "
+                                "Use 'UTC' for FFXIV Server Time. Empty if the post never "
+                                "says - do NOT guess.")},
+            "start_local": {"type": "string",
+                "description": ("Start time in the host's OWN timezone, 24h HH:MM. Do NOT "
+                                "convert it to anywhere else. '5pm EST' is '17:00'.")},
+            "end_local": {"type": "string",
+                "description": "End time, same timezone, 24h HH:MM. Empty if none given."},
             "warning": {"type": "string",
                 "description": ("EMPTY STRING unless something is genuinely wrong. Only "
                                 "fill this when the post text and the graphic disagree, "
@@ -161,7 +163,7 @@ EXTRACT_SCHEMA = {
                                 "already shows that.")},
         },
         "required": ["is_art_party", "tag", "address", "date", "time_as_written",
-                     "source_timezone", "start_pt", "end_pt", "warning"],
+                     "timezone", "start_local", "end_local", "warning"],
     },
 }
 
@@ -185,16 +187,21 @@ FFXIV addresses look like "Datacenter, World, District, Ward, Plot".
 Wards and plots are usually written W# and P#. Subdivision and apartment \
 numbers matter - keep them.
 
-TIMEZONES ARE THE MOST IMPORTANT THING TO GET RIGHT, and the easiest to get \
-wrong. Rules:
+TIMES: do NOT convert between timezones. Report the time the host stated, \
+in the host's own zone, and name that zone. The calendar does the converting.
+- start_local / end_local: the stated time as 24-hour HH:MM. "5pm EST" is \
+"17:00". "7:30pm" is "19:30". Nothing moves.
+- timezone: the IANA name for the zone the host used - America/New_York for \
+ET, America/Chicago for CT, America/Denver for MT, America/Los_Angeles for \
+PT, Europe/London for GMT/BST, Asia/Tokyo for JST. Use the IANA name, not \
+the abbreviation, and don't worry about daylight saving: the IANA zone \
+already handles it for whatever date the event falls on.
 - "ST" or "Server Time" means UTC. Always.
-- A named zone (EST, CST, PDT, BST, JST...) is what it says. Mind the \
-daylight-saving variant that applies on the event's date, not today's.
-- If the time has NO zone at all, leave source_timezone and start_pt as \
-EMPTY STRINGS. Do not assume the host's zone, do not assume Pacific. A human \
-will resolve it.
-- Put the time exactly as worded in time_as_written, before any conversion, \
-so the reviewer can check your work.
+- If the post gives a time with NO zone at all, leave timezone as an EMPTY \
+STRING. Do not guess, and do not assume the host posts from their own \
+country. A human will resolve it.
+- Put the time exactly as worded in time_as_written so the reviewer can \
+check you read it correctly.
 
 DATES: "Saturday" or "Nov 30" with no year means the next future occurrence \
 relative to the current date below. If that lands more than 90 days out, say \
@@ -266,8 +273,9 @@ def build_row(fields, post, link):
         "Status": "",
         "Tag": fields.get("tag") or "",
         "Date": fields.get("date") or "",
-        "Start PT": fields.get("start_pt") or "",
-        "End PT": fields.get("end_pt") or "",
+        "Start": fields.get("start_local") or "",
+        "End": fields.get("end_local") or "",
+        "Zone": fields.get("timezone") or "",
         "As written": fields.get("time_as_written") or "",
         "Address": fields.get("address") or "",
         "Link": link,
@@ -332,10 +340,10 @@ def main():
         if DRY_RUN:
             print(f"    tag={fields.get('tag') or '-'} "
                   f"date={fields.get('date') or '-'} "
-                  f"start={fields.get('start_pt') or '-'} "
-                  f"end={fields.get('end_pt') or '-'}")
-            print(f"    as written: {fields.get('time_as_written') or '-'} "
-                  f"({fields.get('source_timezone') or 'no zone given'})")
+                  f"start={fields.get('start_local') or '-'} "
+                  f"end={fields.get('end_local') or '-'} "
+                  f"zone={fields.get('timezone') or '-'}")
+            print(f"    as written: {fields.get('time_as_written') or '-'}")
             print(f"    address: {fields.get('address') or '-'}")
             if fields.get("warning"):
                 print(f"    check: {fields['warning']}")
