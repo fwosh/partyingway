@@ -1,0 +1,8 @@
+# Credentials — never commit these
+*.json
+!state.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/

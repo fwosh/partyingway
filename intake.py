@@ -1,0 +1,309 @@
+#!/usr/bin/env python3
+"""
+Watch for art-party submissions on Bluesky and queue them for review.
+
+Protocol: a host (or anyone) tags @partyingway in a REPLY to the post that
+announces the party. The reply is only the signal - the details live in the
+root post of that thread, which is also what eventually gets reposted. So
+each mention is walked up to its thread root, read, and turned into a row
+on the review sheet for a human to check.
+
+Nothing here publishes anything. DMs are ignored by design.
+"""
+
+import json
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+import requests
+
+import sheet
+
+BSKY_HANDLE = os.environ["BSKY_HANDLE"]
+BSKY_APP_PASSWORD = os.environ["BSKY_APP_PASSWORD"]
+ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+
+MODEL = os.environ.get("MODEL", "claude-sonnet-5-5")
+LOOKBACK_HOURS = int(os.environ.get("LOOKBACK_HOURS", "48"))
+# Ceiling on API calls per run, so a burst of mentions can't spend a lot.
+MAX_PARSES_PER_RUN = int(os.environ.get("MAX_PARSES_PER_RUN", "8"))
+DRY_RUN = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
+
+PDS = "https://bsky.social"
+APPVIEW = "https://public.api.bsky.app"
+PACIFIC = ZoneInfo("America/Los_Angeles")
+
+
+# ---------- bluesky ----------
+
+def create_session():
+    resp = requests.post(
+        f"{PDS}/xrpc/com.atproto.server.createSession",
+        json={"identifier": BSKY_HANDLE, "password": BSKY_APP_PASSWORD},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def list_mentions(session, since):
+    """Mention notifications newer than `since`.
+
+    listNotifications needs auth, so this goes through the PDS with the
+    session token rather than the public AppView.
+    """
+    out, cursor = [], None
+    for _ in range(5):
+        params = {"limit": 50}
+        if cursor:
+            params["cursor"] = cursor
+        resp = requests.get(
+            f"{PDS}/xrpc/app.bsky.notification.listNotifications",
+            headers={"Authorization": f"Bearer {session['accessJwt']}"},
+            params=params, timeout=30,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        reached_end = False
+        for notif in payload.get("notifications", []):
+            if notif.get("indexedAt", "") < since:
+                reached_end = True
+                continue
+            if notif.get("reason") == "mention":
+                out.append(notif)
+        cursor = payload.get("cursor")
+        if reached_end or not cursor:
+            break
+    return out
+
+
+def source_uri(notification):
+    """The post the details actually live in: the thread root for a reply,
+    or the post itself if someone tagged us in a standalone post."""
+    reply = (notification.get("record") or {}).get("reply") or {}
+    return (reply.get("root") or {}).get("uri") or notification.get("uri")
+
+
+def get_post(uri):
+    resp = requests.get(
+        f"{APPVIEW}/xrpc/app.bsky.feed.getPosts",
+        params={"uris": uri}, timeout=30,
+    )
+    resp.raise_for_status()
+    posts = resp.json().get("posts", [])
+    return posts[0] if posts else None
+
+
+def post_images(post):
+    """Covers plain image embeds and the record-with-media shape a post gets
+    when it quotes something and carries art."""
+    embed = post.get("embed") or {}
+    images = embed.get("images")
+    if images is None and "media" in embed:
+        images = (embed.get("media") or {}).get("images")
+    return [
+        {"url": img["fullsize"], "alt": (img.get("alt") or "").strip()}
+        for img in (images or []) if img.get("fullsize")
+    ]
+
+
+def web_url(post):
+    rkey = post["uri"].rsplit("/", 1)[-1]
+    handle = (post.get("author") or {}).get("handle") or ""
+    return f"https://bsky.app/profile/{handle}/post/{rkey}"
+
+
+# ---------- parsing ----------
+
+EXTRACT_TOOL = {
+    "name": "record_art_party",
+    "description": "Record the details of an FFXIV art party from a post.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "is_art_party": {"type": "boolean",
+                "description": "False if the post isn't announcing an art party."},
+            "tag": {"type": ["string", "null"],
+                "description": "Event hashtag including the leading #. Null if none."},
+            "address": {"type": ["string", "null"],
+                "description": ("FFXIV location as 'Datacenter, World, District, Ward, "
+                                "Plot'. Keep apartment/subdivision detail. Null if absent.")},
+            "date": {"type": ["string", "null"],
+                "description": "Event date as YYYY-MM-DD in Pacific. Null if undeterminable."},
+            "time_as_written": {"type": ["string", "null"],
+                "description": "Start time EXACTLY as worded, e.g. '7pm EST', '19:00 ST'."},
+            "source_timezone": {"type": ["string", "null"],
+                "description": ("IANA zone of the written time, or 'UTC' for Server Time. "
+                                "Null if the post never says - do NOT guess.")},
+            "start_pt": {"type": ["string", "null"],
+                "description": "Start converted to Pacific, 24h HH:MM. Null if zone unknown."},
+            "end_pt": {"type": ["string", "null"],
+                "description": "End time in Pacific, 24h HH:MM. Null if no end time given."},
+            "notes": {"type": "string",
+                "description": ("One or two sentences for the reviewer: how you read the "
+                                "timezone, what was missing, and any disagreement between "
+                                "the post text and the graphic.")},
+        },
+        "required": ["is_art_party", "tag", "address", "date", "time_as_written",
+                     "source_timezone", "start_pt", "end_pt", "notes"],
+    },
+}
+
+SYSTEM_PROMPT = """\
+You extract Final Fantasy XIV art party details from Bluesky posts for a \
+community calendar.
+
+THE POST TEXT IS AUTHORITATIVE. Hosts usually write the full details out in \
+the body, and that is what you should read first and trust. An attached \
+graphic is normally a poster that restates the same information, so use it \
+to CONFIRM what the text says, and to fill a gap only where the text is \
+genuinely silent. If the graphic and the text disagree about a date, time or \
+address, follow the TEXT and say plainly in notes that they disagree and what \
+each one said - a human will settle it. Never let a hard-to-read flyer \
+override something the text states clearly.
+
+FFXIV addresses look like "Datacenter, World, District, Ward, Plot".
+  Datacenters (NA): Aether, Primal, Crystal, Dynamis
+  Datacenters (EU): Light, Chaos      (JP): Elemental, Gaia, Mana, Meteor
+  Housing districts: Mist, The Lavender Beds, The Goblet, Shirogane, Empyreum
+Wards and plots are usually written W# and P#. Subdivision and apartment \
+numbers matter - keep them.
+
+TIMEZONES ARE THE MOST IMPORTANT THING TO GET RIGHT, and the easiest to get \
+wrong. Rules:
+- "ST" or "Server Time" means UTC. Always.
+- A named zone (EST, CST, PDT, BST, JST...) is what it says. Mind the \
+daylight-saving variant that applies on the event's date, not today's.
+- If the time has NO zone at all, set source_timezone and start_pt to null. \
+Do not assume the host's zone, do not assume Pacific. A human will resolve it.
+- Put the time exactly as worded in time_as_written, before any conversion, \
+so the reviewer can check your work.
+
+DATES: "Saturday" or "Nov 30" with no year means the next future occurrence \
+relative to the current date below. If that lands more than 90 days out, say \
+so in notes.
+
+Never invent a detail that isn't present. A null is correct and useful; a \
+plausible guess is harmful, because it can pass review unnoticed.
+"""
+
+
+def parse_post(post):
+    now_pt = datetime.now(PACIFIC)
+    text = (post.get("record") or {}).get("text", "")
+    images = post_images(post)
+
+    content = []
+    for image in images:
+        content.append({"type": "image",
+                        "source": {"type": "url", "url": image["url"]}})
+        if image["alt"]:
+            content.append({"type": "text",
+                            "text": f"(alt text for the image above: {image['alt']})"})
+    content.append({"type": "text", "text": (
+        f"Current date and time in Pacific: {now_pt.strftime('%Y-%m-%d %H:%M %Z')}\n"
+        f"Post author: @{(post.get('author') or {}).get('handle', '')}\n"
+        f"Attached graphics: {len(images)}\n\n"
+        f"POST TEXT (authoritative):\n{text or '(no text)'}"
+    )})
+
+    resp = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={"x-api-key": ANTHROPIC_API_KEY,
+                 "anthropic-version": "2023-06-01",
+                 "content-type": "application/json"},
+        json={"model": MODEL, "max_tokens": 2000, "system": SYSTEM_PROMPT,
+              "tools": [EXTRACT_TOOL],
+              "tool_choice": {"type": "tool", "name": "record_art_party"},
+              "messages": [{"role": "user", "content": content}]},
+        timeout=120,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+    usage = payload.get("usage", {})
+    print(f"    tokens in/out: {usage.get('input_tokens')}/{usage.get('output_tokens')}")
+    for block in payload.get("content", []):
+        if block.get("type") == "tool_use":
+            return block["input"]
+    raise RuntimeError("model returned no tool_use block")
+
+
+# ---------- rows ----------
+
+def build_row(fields, post, link):
+    images = post_images(post)
+    flyer = f'=IMAGE("{images[0]["url"]}", 1)' if images else ""
+    return {
+        "Approve": False,
+        "Status": "",
+        "Tag": fields.get("tag") or "",
+        "Date": fields.get("date") or "",
+        "Start PT": fields.get("start_pt") or "",
+        "End PT": fields.get("end_pt") or "",
+        "As written": fields.get("time_as_written") or "",
+        "Address": fields.get("address") or "",
+        "Link": link,
+        "Flyer": flyer,
+        "Notes": fields.get("notes") or "",
+        "Source": post["uri"],
+        "Queued": datetime.now(PACIFIC).strftime("%Y-%m-%d %H:%M"),
+    }
+
+
+# ---------- main ----------
+
+def main():
+    svc = sheet.service()
+    known = {row["Source"] for row in sheet.read_rows(svc) if row["Source"]}
+    print(f"{len(known)} submission(s) already on the sheet")
+
+    since = (datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)).isoformat()
+    session = create_session()
+    notifications = list_mentions(session, since)
+    print(f"{len(notifications)} mention(s) in the last {LOOKBACK_HOURS}h")
+
+    seen_this_run, parsed = set(), 0
+    for notification in notifications:
+        uri = source_uri(notification)
+        if uri in known or uri in seen_this_run:
+            continue  # several people can tag the same party
+        seen_this_run.add(uri)
+
+        if parsed >= MAX_PARSES_PER_RUN:
+            print(f"  hit the {MAX_PARSES_PER_RUN}-parse cap for this run; "
+                  f"the rest will be picked up next time")
+            break
+
+        post = get_post(uri)
+        if post is None:
+            print(f"  source post is gone, skipping: {uri}")
+            continue
+
+        link = web_url(post)
+        print(f"  parsing {link}")
+        fields = parse_post(post)
+        parsed += 1
+
+        if not fields.get("is_art_party"):
+            print(f"    not an art party; skipping")
+            continue
+
+        row = build_row(fields, post, link)
+        if DRY_RUN:
+            print("    --- would add row ---")
+            for name in sheet.COLUMNS:
+                if row.get(name) not in ("", False):
+                    print(f"      {name}: {row[name]}")
+            continue
+
+        sheet.append_row(row, svc)
+        print(f"    added: {row['Tag'] or '(untagged)'} on {row['Date'] or '?'}")
+
+    print(f"done ({parsed} parsed)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
