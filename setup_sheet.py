@@ -35,6 +35,7 @@ BAND_B = rgb("#F7F8FA")         # barely-there stripe
 AMBER = rgb("#FEF0C7")          # needs a human
 GREEN = rgb("#DCFCE7")          # published, stand down
 MUTED = rgb("#6B7280")
+SKIPPED = rgb("#F3F4F6")   # not an event: present, but quiet
 LINK = rgb("#2563EB")
 
 WIDTHS = {  # pixels, by column name
@@ -49,16 +50,38 @@ FROZEN_COLUMNS = 3              # Approve, Status, Tag stay put when scrolling
 STYLED_ROWS = 2000
 
 
+def ensure_archive(svc, existing_titles):
+    """The archive is a plain dump: same columns, no checkboxes, no colour
+    rules. It exists so dedupe survives rows leaving the queue."""
+    if sheet.ARCHIVE_TAB in existing_titles:
+        return
+    svc.spreadsheets().batchUpdate(
+        spreadsheetId=sheet.spreadsheet_id(),
+        body={"requests": [{"addSheet": {"properties": {
+            "title": sheet.ARCHIVE_TAB,
+            "gridProperties": {"frozenRowCount": 1},
+        }}}]},
+    ).execute()
+    svc.spreadsheets().values().update(
+        spreadsheetId=sheet.spreadsheet_id(),
+        range=f"{sheet.ARCHIVE_TAB}!A1:{sheet.LAST_COL}1",
+        valueInputOption="RAW",
+        body={"values": [sheet.COLUMNS]},
+    ).execute()
+    print(f"created the '{sheet.ARCHIVE_TAB}' tab")
+
+
 def find_tab(svc):
     meta = svc.spreadsheets().get(
         spreadsheetId=sheet.spreadsheet_id(),
         fields=("sheets(properties(sheetId,title,gridProperties),"
                 "conditionalFormats,bandedRanges)"),
     ).execute()
+    titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
+    ensure_archive(svc, titles)
     for s in meta.get("sheets", []):
         if s["properties"]["title"] == sheet.TAB:
             return s
-    titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
     sys.exit(f"No tab named {sheet.TAB!r}. Tabs present: {titles}. "
              f"Rename one, or set SHEET_TAB.")
 
@@ -193,6 +216,28 @@ def main():
         }},
     ]
 
+    # Store real dates and times, show them the way a person reads them.
+    requests += [
+        {"repeatCell": {
+            "range": column("Date"),
+            "cell": {"userEnteredFormat": {
+                "numberFormat": {"type": "DATE", "pattern": "mmmm d, yyyy"}}},
+            "fields": "userEnteredFormat.numberFormat",
+        }},
+        {"repeatCell": {
+            "range": column("Start PT"),
+            "cell": {"userEnteredFormat": {
+                "numberFormat": {"type": "TIME", "pattern": "h:mm am/pm"}}},
+            "fields": "userEnteredFormat.numberFormat",
+        }},
+        {"repeatCell": {
+            "range": column("End PT"),
+            "cell": {"userEnteredFormat": {
+                "numberFormat": {"type": "TIME", "pattern": "h:mm am/pm"}}},
+            "fields": "userEnteredFormat.numberFormat",
+        }},
+    ]
+
     for name in CENTRED:
         requests.append({"repeatCell": {
             "range": column(name),
@@ -223,6 +268,8 @@ def main():
     # $L is Source. Every rule is gated on it so that empty rows, of which a
     # new sheet has a thousand, stay plain.
     HAS_DATA = '$L2<>""'
+    # Still waiting on a reviewer: no status yet, or publish asked for a fix.
+    AWAITING = f'AND({HAS_DATA},OR($B2="",LEFT($B2,5)="needs"))'
 
     def rule(index, ranges, formula, colour):
         return {"addConditionalFormatRule": {"index": index, "rule": {
@@ -237,14 +284,17 @@ def main():
     for index, ranges, formula, colour in [
         # Published first, so a finished row doesn't also light up amber.
         (0, [data], f'=AND({HAS_DATA},REGEXMATCH($B2&"","^Posted"))', GREEN),
-        (1, [column("Tag")], f'=AND({HAS_DATA},$C2="")', AMBER),
-        (2, [column("Date")], f'=AND({HAS_DATA},$D2="")', AMBER),
-        (3, [column("Start PT")], f'=AND({HAS_DATA},$E2="")', AMBER),
+        # Not an art party: kept so the mention is never re-parsed, but
+        # greyed so it doesn't read as work waiting to be done.
+        (1, [data], f'=AND({HAS_DATA},$B2="Not an event")', SKIPPED),
+        (2, [column("Tag")], f'=AND({AWAITING},$C2="")', AMBER),
+        (3, [column("Date")], f'=AND({AWAITING},$D2="")', AMBER),
+        (4, [column("Start PT")], f'=AND({AWAITING},$E2="")', AMBER),
         # Empty, or lacking the comma-separated shape of an FFXIV address.
-        (4, [column("Address")],
-         f'=AND({HAS_DATA},OR($H2="",LEN($H2)-LEN(SUBSTITUTE($H2,",",""))<3))',
+        (5, [column("Address")],
+         f'=AND({AWAITING},OR($H2="",LEN($H2)-LEN(SUBSTITUTE($H2,",",""))<3))',
          AMBER),
-        (5, [column("Check")], f'=AND({HAS_DATA},$K2<>"")', AMBER),
+        (6, [column("Check")], f'=AND({AWAITING},$K2<>"")', AMBER),
     ]:
         requests.append(rule(index, ranges, formula, colour))
 

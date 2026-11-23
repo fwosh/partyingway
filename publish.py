@@ -18,7 +18,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -32,6 +32,10 @@ BSKY_APP_PASSWORD = os.environ["BSKY_APP_PASSWORD"]
 PUBLISH_MODE = os.environ.get("PUBLISH_MODE", "calendar").lower()
 REPOST = os.environ.get("REPOST", "true").lower() in ("1", "true", "yes")
 DEFAULT_DURATION_HOURS = int(os.environ.get("DEFAULT_DURATION_HOURS", "3"))
+# How long a finished row stays in the queue before moving to the archive.
+# The reminder reads the calendar, not the sheet, so archiving early is safe:
+# the row's only remaining job is to stop the mention being re-queued.
+ARCHIVE_AFTER_DAYS = int(os.environ.get("ARCHIVE_AFTER_DAYS", "14"))
 DRY_RUN = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
 
 PDS = "https://bsky.social"
@@ -53,25 +57,55 @@ def clean(value):
     return str(value).strip() if value not in (None, "") else ""
 
 
+# Sheets counts days from this date, so a formatted date cell reads back as
+# a plain number. Times come back as a fraction of a day.
+SHEETS_EPOCH = date(1899, 12, 30)
+
+
+def as_date(value):
+    """Accept either a Sheets date serial or a typed-in string."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return SHEETS_EPOCH + timedelta(days=int(value))
+    text = clean(value)
+    for fmt in ("%Y-%m-%d", "%B %d, %Y", "%b %d, %Y", "%m/%d/%Y", "%m/%d/%y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def as_time(value):
+    """Accept either a Sheets time fraction or a typed-in string."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        minutes = round((float(value) % 1) * 24 * 60)
+        return time((minutes // 60) % 24, minutes % 60)
+    text = clean(value).upper().replace(".", "")
+    for fmt in ("%H:%M", "%H:%M:%S", "%I:%M %p", "%I:%M%p", "%I %p"):
+        try:
+            return datetime.strptime(text, fmt).time()
+        except ValueError:
+            continue
+    return None
+
+
 def parse_when(row):
-    date_text = clean(row["Date"])
-    try:
-        day = datetime.strptime(date_text, "%Y-%m-%d").date()
-    except ValueError:
-        raise RowProblem(f"date should be YYYY-MM-DD, not {date_text!r}")
+    day = as_date(row["Date"])
+    if day is None:
+        raise RowProblem(f"couldn't read the date {clean(row['Date'])!r}")
 
-    def clock(value, label):
-        text = clean(value)
-        for fmt in ("%H:%M", "%H:%M:%S"):
-            try:
-                return datetime.strptime(text, fmt).time()
-            except ValueError:
-                continue
-        raise RowProblem(f"{label} should be 24h HH:MM, not {text!r}")
+    start_time = as_time(row["Start PT"])
+    if start_time is None:
+        raise RowProblem(f"couldn't read the start time {clean(row['Start PT'])!r}")
 
-    start = datetime.combine(day, clock(row["Start PT"], "start"), tzinfo=PACIFIC)
-    if clean(row["End PT"]):
-        end = datetime.combine(day, clock(row["End PT"], "end"), tzinfo=PACIFIC)
+    start = datetime.combine(day, start_time, tzinfo=PACIFIC)
+    end_time = as_time(row["End PT"]) if clean(row["End PT"]) else None
+    if end_time is not None:
+        end = datetime.combine(day, end_time, tzinfo=PACIFIC)
         if end <= start:
             end += timedelta(days=1)  # runs past midnight
     else:
@@ -188,10 +222,45 @@ def repost(session, subject):
 # ---------- main ----------
 
 def pending(row):
-    """Ticked and either never published or previously flagged - so fixing a
-    flagged cell is enough to make it retry."""
+    """Ticked and either never published or previously flagged, so fixing a
+    flagged cell is enough to make it retry.
+
+    Any other Status - "Posted ...", "Not an event", or anything a reviewer
+    typed by hand - takes the row out of consideration permanently.
+    """
     status = clean(row["Status"])
     return sheet.is_ticked(row) and (not status or status.startswith("needs"))
+
+
+def finished(row):
+    """Nothing further will happen to this row."""
+    status = clean(row["Status"])
+    return bool(status) and not status.startswith("needs")
+
+
+def stale(row, now):
+    queued = clean(row["Queued"])
+    if not queued:
+        return False
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            when = datetime.strptime(queued[:16], fmt).replace(tzinfo=PACIFIC)
+        except ValueError:
+            continue
+        return (now - when).days >= ARCHIVE_AFTER_DAYS
+    return False
+
+
+def sweep(svc):
+    """Move finished, aged rows out of the queue so it stays short."""
+    now = datetime.now(PACIFIC)
+    rows = [r for r in sheet.read_rows(svc) if finished(r) and stale(r, now)]
+    if not rows:
+        return
+    moved = sheet.move_to_archive(
+        [r["_row"] for r in rows], svc,
+        sheet_id=sheet.tab_id(svc), archive_id=None)
+    print(f"archived {moved} finished row(s) older than {ARCHIVE_AFTER_DAYS} days")
 
 
 def main():
@@ -245,6 +314,8 @@ def main():
         sheet.set_cell(row["_row"], "Status", status, svc)
         print(f"  {label}: {status} — {where}")
 
+    if not DRY_RUN:
+        sweep(svc)
     print("done")
     return 0
 

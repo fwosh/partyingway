@@ -275,8 +275,8 @@ def build_row(fields, post, link):
 def main():
     svc = sheet.service()
     sid = sheet.tab_id(svc)
-    known = {row["Source"] for row in sheet.read_rows(svc) if row["Source"]}
-    print(f"{len(known)} submission(s) already on the sheet")
+    known = sheet.read_sources(svc)
+    print(f"{len(known)} submission(s) already seen (queue + archive)")
 
     since = (datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)).isoformat()
     session = create_session()
@@ -312,11 +312,11 @@ def main():
             continue
         parsed += 1
 
-        if not fields.get("is_art_party"):
-            print(f"    not an art party; skipping")
-            continue
-
         row = build_row(fields, post, link)
+        if not fields.get("is_art_party"):
+            # Still write a row: the Source column is the only thing that
+            # stops this mention being parsed again on every single run.
+            row = {**row, "Status": "Not an event"}
         if DRY_RUN:
             print("    --- would add row ---")
             for name in sheet.COLUMNS:
@@ -325,7 +325,10 @@ def main():
             continue
 
         sheet.append_row(row, svc, sheet_id=sid)
-        print(f"    added: {row['Tag'] or '(untagged)'} on {row['Date'] or '?'}")
+        if row["Status"]:
+            print(f"    logged as {row['Status'].lower()}")
+        else:
+            print(f"    added: {row['Tag'] or '(untagged)'} on {row['Date'] or '?'}")
 
     remaining = len([n for n in notifications
                      if source_uri(n) not in known and source_uri(n) not in seen_this_run])
