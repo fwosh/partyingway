@@ -118,7 +118,6 @@ def web_url(post):
 # ---------- parsing ----------
 
 EXTRACT_SCHEMA = {
-    "name": "art_party",
     "schema": {
         "type": "object",
         "additionalProperties": False,
