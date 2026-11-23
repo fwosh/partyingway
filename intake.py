@@ -34,6 +34,14 @@ MAX_PARSES_PER_RUN = int(os.environ.get("MAX_PARSES_PER_RUN", "8"))
 # Bluesky allows 4 per post, so this is effectively "all of them".
 MAX_IMAGES = int(os.environ.get("MAX_IMAGES", "4"))
 DRY_RUN = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
+# Re-read posts already on the sheet. For comparing models against each
+# other on the same posts, where dedupe would otherwise skip everything.
+IGNORE_SEEN = os.environ.get("IGNORE_SEEN", "").lower() in ("1", "true", "yes")
+if IGNORE_SEEN and not DRY_RUN:
+    # Writing would duplicate every row, so this combination is never what
+    # anyone means.
+    print("IGNORE_SEEN only runs as a dry run; not writing to the sheet.")
+    DRY_RUN = True
 
 PDS = "https://bsky.social"
 APPVIEW = "https://public.api.bsky.app"
@@ -275,8 +283,12 @@ def build_row(fields, post, link):
 def main():
     svc = sheet.service()
     sid = sheet.tab_id(svc)
-    known = sheet.read_sources(svc)
-    print(f"{len(known)} submission(s) already seen (queue + archive)")
+    known = set() if IGNORE_SEEN else sheet.read_sources(svc)
+    print(f"model: {MODEL}")
+    if IGNORE_SEEN:
+        print("ignoring what's already on the sheet (comparison run)")
+    else:
+        print(f"{len(known)} submission(s) already seen (queue + archive)")
 
     since = (datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)).isoformat()
     session = create_session()
@@ -318,10 +330,17 @@ def main():
             # stops this mention being parsed again on every single run.
             row = {**row, "Status": "Not an event"}
         if DRY_RUN:
-            print("    --- would add row ---")
-            for name in sheet.COLUMNS:
-                if row.get(name) not in ("", False):
-                    print(f"      {name}: {row[name]}")
+            print(f"    tag={fields.get('tag') or '-'} "
+                  f"date={fields.get('date') or '-'} "
+                  f"start={fields.get('start_pt') or '-'} "
+                  f"end={fields.get('end_pt') or '-'}")
+            print(f"    as written: {fields.get('time_as_written') or '-'} "
+                  f"({fields.get('source_timezone') or 'no zone given'})")
+            print(f"    address: {fields.get('address') or '-'}")
+            if fields.get("warning"):
+                print(f"    check: {fields['warning']}")
+            if row["Status"]:
+                print(f"    -> {row['Status']}")
             continue
 
         sheet.append_row(row, svc, sheet_id=sid)

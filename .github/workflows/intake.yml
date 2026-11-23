@@ -14,6 +14,17 @@ on:
         description: "How far back to scan mentions"
         type: string
         default: "48"
+      model:
+        description: "Model to parse with"
+        type: choice
+        default: claude-sonnet-5-5
+        options:
+          - claude-sonnet-5-5
+          - claude-haiku-5-5
+      ignore_seen:
+        description: "Re-parse posts already on the sheet (forces dry run)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -41,4 +52,7 @@ jobs:
           SHEET_ID: ${{ secrets.SHEET_ID }}
           DRY_RUN: ${{ inputs.dry_run }}
           LOOKBACK_HOURS: ${{ inputs.lookback_hours || '48' }}
+          IGNORE_SEEN: ${{ inputs.ignore_seen }}
+          # Scheduled runs take the default; a manual run can override it.
+          MODEL: ${{ inputs.model || 'claude-sonnet-5-5' }}
         run: python intake.py
