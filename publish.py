@@ -122,15 +122,33 @@ def check(row):
 
 # ---------- publishing ----------
 
+def hashtag_url(tag):
+    """A Bluesky hashtag feed URL. Strips the leading # and anything that
+    can't appear in a tag, so a stray character can't break the link."""
+    bare = re.sub(r"[^\w]", "", clean(tag).lstrip("#"))
+    return f"https://bsky.app/hashtag/{bare}" if bare else ""
+
+
 def to_calendar(row, start, end):
-    """What post_reminders.py will read an hour before the event, so the
-    shapes have to line up: Location becomes the quote-post embed and
-    Description becomes the reminder's body text."""
+    """What post_reminders.py reads an hour before the event, so the shapes
+    have to line up: Location becomes the quote-post embed, and Description
+    becomes the reminder's body text once its HTML is stripped."""
     tag, address = clean(row["Tag"]), clean(row["Address"])
+    lines = []
+    if address:
+        lines.append(f"\U0001f3d8\ufe0fLocation: {address}")
+    if tag:
+        url = hashtag_url(tag)
+        # Calendar descriptions render HTML, so the tag can link out to the
+        # Bluesky feed for it. post_reminders.py strips the markup, leaving
+        # a plain #tag that its own facet logic makes tappable again.
+        linked = f'<a href="{url}">{tag}</a>' if url else tag
+        lines.append(f"\U0001f3f7\ufe0fTag: {linked}")
+
     event = {
-        "summary": f"Art Party — {tag}",
+        "summary": tag or "Art party",
         "location": clean(row["Link"]),
-        "description": f"{address} {tag}".strip(),
+        "description": "\n".join(lines),
         "start": {"dateTime": start.isoformat(), "timeZone": "America/Los_Angeles"},
         "end": {"dateTime": end.isoformat(), "timeZone": "America/Los_Angeles"},
     }
