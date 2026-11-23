@@ -9,6 +9,7 @@ drift out of sync.
 
 import json
 import os
+import re
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -29,7 +30,7 @@ COLUMNS = [
     "Address",      # H  FFXIV location
     "Link",         # I  the post being advertised
     "Flyer",        # J  =IMAGE() so the graphic shows in the sheet
-    "Notes",        # K  parser's remarks: ambiguity, conflicts
+    "Check",        # K  blank unless the parser hit a real problem
     "Source",       # L  AT-URI, the dedupe key
     "Queued",       # M
 ]
@@ -70,17 +71,50 @@ def read_rows(svc=None):
     return rows
 
 
-def append_row(values, svc=None):
+ROW_HEIGHT = int(os.environ.get("FLYER_ROW_HEIGHT", "240"))
+
+
+def tab_id(svc=None):
+    svc = svc or service()
+    meta = svc.spreadsheets().get(spreadsheetId=spreadsheet_id()).execute()
+    for s in meta.get("sheets", []):
+        if s["properties"]["title"] == TAB:
+            return s["properties"]["sheetId"]
+    return None
+
+
+def append_row(values, svc=None, sheet_id=None):
     """values: a dict keyed by column name. USER_ENTERED so =IMAGE() is
-    treated as a formula rather than literal text."""
+    treated as a formula rather than literal text.
+
+    With sheet_id, the new row is then made tall enough to show its flyer.
+    Sizing rows one at a time as they arrive avoids leaving hundreds of
+    tall empty rows below the data.
+    """
     svc = svc or service()
     ordered = [values.get(name, "") for name in COLUMNS]
-    svc.spreadsheets().values().append(
+    resp = svc.spreadsheets().values().append(
         spreadsheetId=spreadsheet_id(),
         range=f"{TAB}!A:{LAST_COL}",
         valueInputOption="USER_ENTERED",
         insertDataOption="INSERT_ROWS",
         body={"values": [ordered]},
+    ).execute()
+
+    if sheet_id is None:
+        return
+    match = re.search(r"!A(\d+)", resp.get("updates", {}).get("updatedRange", ""))
+    if not match:
+        return
+    index = int(match.group(1)) - 1  # the API counts rows from 0
+    svc.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id(),
+        body={"requests": [{"updateDimensionProperties": {
+            "range": {"sheetId": sheet_id, "dimension": "ROWS",
+                      "startIndex": index, "endIndex": index + 1},
+            "properties": {"pixelSize": ROW_HEIGHT},
+            "fields": "pixelSize",
+        }}]},
     ).execute()
 
 

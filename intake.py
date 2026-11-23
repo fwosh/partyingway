@@ -29,6 +29,9 @@ MODEL = os.environ.get("MODEL", "claude-sonnet-5-5")
 LOOKBACK_HOURS = int(os.environ.get("LOOKBACK_HOURS", "48"))
 # Ceiling on API calls per run, so a burst of mentions can't spend a lot.
 MAX_PARSES_PER_RUN = int(os.environ.get("MAX_PARSES_PER_RUN", "8"))
+# Images dominate the cost. The first attachment is almost always the flyer;
+# later ones are usually sample art that tells us nothing about the details.
+MAX_IMAGES = int(os.environ.get("MAX_IMAGES", "1"))
 DRY_RUN = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
 
 PDS = "https://bsky.social"
@@ -140,13 +143,16 @@ EXTRACT_SCHEMA = {
                 "description": "Start converted to Pacific, 24h HH:MM. Empty if zone unknown."},
             "end_pt": {"type": "string",
                 "description": "End time in Pacific, 24h HH:MM. Empty if no end time given."},
-            "notes": {"type": "string",
-                "description": ("One or two sentences for the reviewer: how you read the "
-                                "timezone, what was missing, and any disagreement between "
-                                "the post text and the graphic.")},
+            "warning": {"type": "string",
+                "description": ("EMPTY STRING unless something is genuinely wrong. Only "
+                                "fill this when the post text and the graphic disagree, "
+                                "or a value is ambiguous enough that a human must decide. "
+                                "Then: at most 10 words, e.g. 'text says 7pm, flyer says "
+                                "8pm'. Missing fields need no warning - a blank cell "
+                                "already shows that.")},
         },
         "required": ["is_art_party", "tag", "address", "date", "time_as_written",
-                     "source_timezone", "start_pt", "end_pt", "notes"],
+                     "source_timezone", "start_pt", "end_pt", "warning"],
     },
 }
 
@@ -187,14 +193,19 @@ so in notes.
 
 Never invent a detail that isn't present. Leave any field you cannot \
 determine as an empty string - that is correct and useful, whereas a \
-plausible guess is harmful, because it can pass review unnoticed.
+plausible guess is harmful, because it can pass review unnoticed. A blank \
+field is how the reviewer sees there was nothing to find, so it needs no \
+comment. Leave `warning` empty unless something genuinely conflicts.
 """
 
 
 def parse_post(post):
     now_pt = datetime.now(PACIFIC)
     text = (post.get("record") or {}).get("text", "")
-    images = post_images(post)
+    all_images = post_images(post)
+    images = all_images[:MAX_IMAGES]
+    if len(all_images) > len(images):
+        print(f"    {len(all_images)} images attached, sending {len(images)}")
 
     content = []
     for image in images:
@@ -252,7 +263,7 @@ def build_row(fields, post, link):
         "Address": fields.get("address") or "",
         "Link": link,
         "Flyer": flyer,
-        "Notes": fields.get("notes") or "",
+        "Check": fields.get("warning") or "",
         "Source": post["uri"],
         "Queued": datetime.now(PACIFIC).strftime("%Y-%m-%d %H:%M"),
     }
@@ -262,6 +273,7 @@ def build_row(fields, post, link):
 
 def main():
     svc = sheet.service()
+    sid = sheet.tab_id(svc)
     known = {row["Source"] for row in sheet.read_rows(svc) if row["Source"]}
     print(f"{len(known)} submission(s) already on the sheet")
 
@@ -311,7 +323,7 @@ def main():
                     print(f"      {name}: {row[name]}")
             continue
 
-        sheet.append_row(row, svc)
+        sheet.append_row(row, svc, sheet_id=sid)
         print(f"    added: {row['Tag'] or '(untagged)'} on {row['Date'] or '?'}")
 
     remaining = len([n for n in notifications

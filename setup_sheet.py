@@ -15,16 +15,21 @@ Safe to re-run: it overwrites the header and formatting, and leaves any
 data rows alone.
 """
 
+import os
 import sys
 
 import sheet
 
 WIDTHS = {  # pixels, by column name
     "Approve": 70, "Status": 110, "Tag": 120, "Date": 90, "Start PT": 70,
-    "End PT": 70, "As written": 100, "Address": 260, "Link": 180,
-    "Flyer": 120, "Notes": 300, "Source": 60, "Queued": 140,
+    "End PT": 70, "As written": 100, "Address": 240, "Link": 170,
+    "Flyer": 240, "Check": 180, "Source": 60, "Queued": 120,
 }
-FLYER_ROW_HEIGHT = 90
+# Tall enough to actually read a flyer without opening the post.
+FLYER_ROW_HEIGHT = int(os.environ.get("FLYER_ROW_HEIGHT", "240"))
+AMBER = {"red": 1, "green": 0.90, "blue": 0.70}
+GREEN = {"red": 0.87, "green": 0.95, "blue": 0.87}
+DATA_ROWS = 2000
 
 
 def tab_id(svc):
@@ -35,6 +40,19 @@ def tab_id(svc):
     titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
     sys.exit(f"No tab named {sheet.TAB!r}. Tabs present: {titles}. "
              f"Rename one, or set SHEET_TAB.")
+
+
+def clear_rules(svc, sid):
+    """Re-running should replace the formatting, not pile more on top."""
+    meta = svc.spreadsheets().get(
+        spreadsheetId=sheet.spreadsheet_id(),
+        fields="sheets(properties/sheetId,conditionalFormats)").execute()
+    existing = 0
+    for s in meta.get("sheets", []):
+        if s["properties"]["sheetId"] == sid:
+            existing = len(s.get("conditionalFormats", []))
+    return [{"deleteConditionalFormatRule": {"sheetId": sid, "index": 0}}
+            for _ in range(existing)]
 
 
 def main():
@@ -49,7 +67,7 @@ def main():
         body={"values": [sheet.COLUMNS]},
     ).execute()
 
-    requests = [
+    requests = clear_rules(svc, sid) + [
         # Header: bold, frozen, so it survives sorting and scrolling.
         {"repeatCell": {
             "range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": 1},
@@ -88,32 +106,58 @@ def main():
             "properties": {"hiddenByUser": True},
             "fields": "hiddenByUser",
         }},
-        # Rows tall enough that =IMAGE() renders as something you can read.
-        {"updateDimensionProperties": {
+    ]
+
+    # Make the rows that already hold data tall enough to read a flyer. New
+    # rows size themselves as intake.py writes them, so the sheet never ends
+    # up with a long tail of tall empty rows.
+    existing = len(sheet.read_rows(svc))
+    if existing:
+        requests.append({"updateDimensionProperties": {
             "range": {"sheetId": sid, "dimension": "ROWS",
-                      "startIndex": 1, "endIndex": 500},
+                      "startIndex": 1, "endIndex": 1 + existing},
             "properties": {"pixelSize": FLYER_ROW_HEIGHT},
             "fields": "pixelSize",
-        }},
-        # A row the parser flagged turns amber, so it's obvious at a glance.
-        {"addConditionalFormatRule": {"index": 0, "rule": {
-            "ranges": [{"sheetId": sid, "startRowIndex": 1, "endColumnIndex": n}],
+        }})
+
+    def col_range(name):
+        return {"sheetId": sid, "startRowIndex": 1, "endRowIndex": DATA_ROWS,
+                "startColumnIndex": sheet.INDEX[name],
+                "endColumnIndex": sheet.INDEX[name] + 1}
+
+    def rule(index, ranges, formula, colour):
+        return {"addConditionalFormatRule": {"index": index, "rule": {
+            "ranges": ranges,
             "booleanRule": {
-                "condition": {"type": "CUSTOM_FORMULA", "values": [
-                    {"userEnteredValue": '=OR($E2="",$C2="",$D2="",$H2="")'}]},
-                "format": {"backgroundColor": {"red": 1, "green": 0.95, "blue": 0.8}},
+                "condition": {"type": "CUSTOM_FORMULA",
+                              "values": [{"userEnteredValue": formula}]},
+                "format": {"backgroundColor": colour},
             },
-        }}},
-        # Published rows go green and stop demanding attention.
-        {"addConditionalFormatRule": {"index": 0, "rule": {
-            "ranges": [{"sheetId": sid, "startRowIndex": 1, "endColumnIndex": n}],
-            "booleanRule": {
-                "condition": {"type": "CUSTOM_FORMULA", "values": [
-                    {"userEnteredValue": '=REGEXMATCH($B2&"","^Posted")'}]},
-                "format": {"backgroundColor": {"red": 0.90, "green": 0.96, "blue": 0.90}},
-            },
-        }}},
+        }}}
+
+    # $L is Source: only rows that actually hold a submission. Without this
+    # every empty row in the sheet matches and the whole thing turns amber.
+    HAS_DATA = '$L2<>""'
+    rules = [
+        # Published rows go green and stop asking for attention. First, so a
+        # published row doesn't also light up amber.
+        (0, [{"sheetId": sid, "startRowIndex": 1, "endRowIndex": DATA_ROWS,
+              "endColumnIndex": n}],
+         f'=AND({HAS_DATA},REGEXMATCH($B2&"","^Posted"))', GREEN),
+        # A required field the parser couldn't fill: flag that cell only.
+        (1, [col_range("Tag")], f'=AND({HAS_DATA},$C2="")', AMBER),
+        (2, [col_range("Date")], f'=AND({HAS_DATA},$D2="")', AMBER),
+        (3, [col_range("Start PT")], f'=AND({HAS_DATA},$E2="")', AMBER),
+        # Address empty, or missing the comma-separated shape an FFXIV
+        # address has (datacenter, world, district, ward, plot).
+        (4, [col_range("Address")],
+         f'=AND({HAS_DATA},OR($H2="",LEN($H2)-LEN(SUBSTITUTE($H2,",",""))<3))',
+         AMBER),
+        # Anything the parser explicitly flagged.
+        (5, [col_range("Check")], f'=AND({HAS_DATA},$K2<>"")', AMBER),
     ]
+    for index, ranges, formula, colour in rules:
+        requests.append(rule(index, ranges, formula, colour))
 
     for name, width in WIDTHS.items():
         requests.append({"updateDimensionProperties": {
@@ -128,7 +172,8 @@ def main():
         spreadsheetId=sheet.spreadsheet_id(), body={"requests": requests},
     ).execute()
 
-    print(f"'{sheet.TAB}' is ready: {len(sheet.COLUMNS)} columns, checkboxes in A.")
+    print(f"'{sheet.TAB}' is ready: {len(sheet.COLUMNS)} columns, "
+          f"checkboxes in A, {existing} data row(s) resized.")
     print(f"https://docs.google.com/spreadsheets/d/{sheet.spreadsheet_id()}")
     return 0
 
