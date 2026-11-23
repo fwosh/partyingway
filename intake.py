@@ -117,11 +117,11 @@ def web_url(post):
 
 # ---------- parsing ----------
 
-EXTRACT_TOOL = {
-    "name": "record_art_party",
-    "description": "Record the details of an FFXIV art party from a post.",
-    "input_schema": {
+EXTRACT_SCHEMA = {
+    "name": "art_party",
+    "schema": {
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "is_art_party": {"type": "boolean",
                 "description": "False if the post isn't announcing an art party."},
@@ -217,8 +217,10 @@ def parse_post(post):
                  "anthropic-version": "2023-06-01",
                  "content-type": "application/json"},
         json={"model": MODEL, "max_tokens": 2000, "system": SYSTEM_PROMPT,
-              "tools": [EXTRACT_TOOL],
-              "tool_choice": {"type": "tool", "name": "record_art_party"},
+              # Structured outputs: the reply is guaranteed to be JSON
+              # matching this schema, in a text block.
+              "output_config": {"format": {"type": "json_schema",
+                                           **EXTRACT_SCHEMA}},
               "messages": [{"role": "user", "content": content}]},
         timeout=120,
     )
@@ -230,9 +232,9 @@ def parse_post(post):
     usage = payload.get("usage", {})
     print(f"    tokens in/out: {usage.get('input_tokens')}/{usage.get('output_tokens')}")
     for block in payload.get("content", []):
-        if block.get("type") == "tool_use":
-            return block["input"]
-    raise RuntimeError("model returned no tool_use block")
+        if block.get("type") == "text":
+            return json.loads(block["text"])
+    raise RuntimeError("model returned no text block")
 
 
 # ---------- rows ----------
@@ -269,7 +271,7 @@ def main():
     notifications = list_mentions(session, since)
     print(f"{len(notifications)} mention(s) in the last {LOOKBACK_HOURS}h")
 
-    seen_this_run, parsed = set(), 0
+    seen_this_run, parsed, failed = set(), 0, 0
     for notification in notifications:
         uri = source_uri(notification)
         if uri in known or uri in seen_this_run:
@@ -288,7 +290,14 @@ def main():
 
         link = web_url(post)
         print(f"  parsing {link}")
-        fields = parse_post(post)
+        try:
+            fields = parse_post(post)
+        except Exception as exc:
+            # One unreadable post shouldn't cost us the rest of the batch.
+            # It isn't recorded, so the next run tries it again.
+            print(f"    could not parse: {exc}")
+            failed += 1
+            continue
         parsed += 1
 
         if not fields.get("is_art_party"):
@@ -306,7 +315,9 @@ def main():
         sheet.append_row(row, svc)
         print(f"    added: {row['Tag'] or '(untagged)'} on {row['Date'] or '?'}")
 
-    print(f"done ({parsed} parsed)")
+    remaining = len([n for n in notifications
+                     if source_uri(n) not in known and source_uri(n) not in seen_this_run])
+    print(f"done: {parsed} parsed, {failed} failed, {remaining} left for the next run")
     return 0
 
 
