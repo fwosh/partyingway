@@ -25,7 +25,7 @@ BSKY_HANDLE = os.environ["BSKY_HANDLE"]
 BSKY_APP_PASSWORD = os.environ["BSKY_APP_PASSWORD"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 
-MODEL = os.environ.get("MODEL", "claude-sonnet-5-5")
+MODEL = os.environ.get("MODEL", "claude-haiku-5-5")
 LOOKBACK_HOURS = int(os.environ.get("LOOKBACK_HOURS", "48"))
 # Ceiling on API calls per run, so a burst of mentions can't spend a lot.
 MAX_PARSES_PER_RUN = int(os.environ.get("MAX_PARSES_PER_RUN", "8"))
