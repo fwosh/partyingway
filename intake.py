@@ -29,9 +29,10 @@ MODEL = os.environ.get("MODEL", "claude-sonnet-5-5")
 LOOKBACK_HOURS = int(os.environ.get("LOOKBACK_HOURS", "48"))
 # Ceiling on API calls per run, so a burst of mentions can't spend a lot.
 MAX_PARSES_PER_RUN = int(os.environ.get("MAX_PARSES_PER_RUN", "8"))
-# Images dominate the cost. The first attachment is almost always the flyer;
-# later ones are usually sample art that tells us nothing about the details.
-MAX_IMAGES = int(os.environ.get("MAX_IMAGES", "1"))
+# Images dominate the cost, but capping too hard loses details: hosts often
+# post a decorative in-character image first and the real flyer second.
+# Bluesky allows 4 per post, so this is effectively "all of them".
+MAX_IMAGES = int(os.environ.get("MAX_IMAGES", "4"))
 DRY_RUN = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
 
 PDS = "https://bsky.social"

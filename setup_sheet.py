@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-One-time: prepare the review sheet.
+One-time (and safely repeatable): lay out and style the review sheet.
 
-Writes the header row, turns column A into real checkboxes, sizes the
-columns so the flyer and address are readable, freezes the header, and
-colours the status column. Run it once from your laptop after creating an
-empty spreadsheet and sharing it with the service account.
+Writes the header, turns column A into real checkboxes, sizes everything,
+hides the gridlines and the unused columns, and sets the colour rules that
+tell a reviewer where to look. Run it from your laptop:
 
-    export GOOGLE_SERVICE_ACCOUNT_JSON="$(cat key.json)"
-    export SHEET_ID=...
+    $env:GOOGLE_SERVICE_ACCOUNT_JSON = Get-Content key.json -Raw
+    $env:SHEET_ID = "..."
     python setup_sheet.py
 
-Safe to re-run: it overwrites the header and formatting, and leaves any
-data rows alone.
+Re-running replaces the formatting rather than stacking more on top, so it's
+the right thing to run after any change to the columns in sheet.py.
 """
 
 import os
@@ -20,44 +19,66 @@ import sys
 
 import sheet
 
+
+def rgb(hex_colour):
+    h = hex_colour.lstrip("#")
+    return {"red": int(h[0:2], 16) / 255,
+            "green": int(h[2:4], 16) / 255,
+            "blue": int(h[4:6], 16) / 255}
+
+
+FONT = os.environ.get("SHEET_FONT", "Inter")
+HEADER_BG = rgb("#1F2937")      # near-black slate
+HEADER_FG = rgb("#FFFFFF")
+BAND_A = rgb("#FFFFFF")
+BAND_B = rgb("#F7F8FA")         # barely-there stripe
+AMBER = rgb("#FEF0C7")          # needs a human
+GREEN = rgb("#DCFCE7")          # published, stand down
+MUTED = rgb("#6B7280")
+LINK = rgb("#2563EB")
+
 WIDTHS = {  # pixels, by column name
-    "Approve": 70, "Status": 110, "Tag": 120, "Date": 90, "Start PT": 70,
-    "End PT": 70, "As written": 100, "Address": 240, "Link": 170,
-    "Flyer": 240, "Check": 180, "Source": 60, "Queued": 120,
+    "Approve": 80, "Status": 120, "Tag": 130, "Date": 100, "Start PT": 80,
+    "End PT": 80, "As written": 110, "Address": 250, "Link": 170,
+    "Flyer": 240, "Check": 200, "Source": 60, "Queued": 120,
 }
-# Tall enough to actually read a flyer without opening the post.
-FLYER_ROW_HEIGHT = int(os.environ.get("FLYER_ROW_HEIGHT", "240"))
-AMBER = {"red": 1, "green": 0.90, "blue": 0.70}
-GREEN = {"red": 0.87, "green": 0.95, "blue": 0.87}
-DATA_ROWS = 2000
+CENTRED = ("Approve", "Date", "Start PT", "End PT", "Queued")
+ROW_HEIGHT = int(os.environ.get("FLYER_ROW_HEIGHT", "240"))
+HEADER_HEIGHT = 44
+FROZEN_COLUMNS = 3              # Approve, Status, Tag stay put when scrolling
+STYLED_ROWS = 2000
 
 
-def tab_id(svc):
-    meta = svc.spreadsheets().get(spreadsheetId=sheet.spreadsheet_id()).execute()
+def find_tab(svc):
+    meta = svc.spreadsheets().get(
+        spreadsheetId=sheet.spreadsheet_id(),
+        fields=("sheets(properties(sheetId,title,gridProperties),"
+                "conditionalFormats,bandedRanges)"),
+    ).execute()
     for s in meta.get("sheets", []):
         if s["properties"]["title"] == sheet.TAB:
-            return s["properties"]["sheetId"]
+            return s
     titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
     sys.exit(f"No tab named {sheet.TAB!r}. Tabs present: {titles}. "
              f"Rename one, or set SHEET_TAB.")
 
 
-def clear_rules(svc, sid):
-    """Re-running should replace the formatting, not pile more on top."""
-    meta = svc.spreadsheets().get(
-        spreadsheetId=sheet.spreadsheet_id(),
-        fields="sheets(properties/sheetId,conditionalFormats)").execute()
-    existing = 0
-    for s in meta.get("sheets", []):
-        if s["properties"]["sheetId"] == sid:
-            existing = len(s.get("conditionalFormats", []))
-    return [{"deleteConditionalFormatRule": {"sheetId": sid, "index": 0}}
-            for _ in range(existing)]
+def clear_existing(tab, sid):
+    """Re-running should replace the styling, not pile more on top. Both
+    conditional formats and banded ranges reject overlapping duplicates."""
+    out = [{"deleteConditionalFormatRule": {"sheetId": sid, "index": 0}}
+           for _ in tab.get("conditionalFormats", [])]
+    out += [{"deleteBanding": {"bandedRangeId": b["bandedRangeId"]}}
+            for b in tab.get("bandedRanges", [])]
+    return out
 
 
 def main():
     svc = sheet.service()
-    sid = tab_id(svc)
+    tab = find_tab(svc)
+    sid = tab["properties"]["sheetId"]
+    grid = tab["properties"].get("gridProperties", {})
+    total_columns = grid.get("columnCount", 26)
     n = len(sheet.COLUMNS)
 
     svc.spreadsheets().values().update(
@@ -67,36 +88,100 @@ def main():
         body={"values": [sheet.COLUMNS]},
     ).execute()
 
-    requests = clear_rules(svc, sid) + [
-        # Header: bold, frozen, so it survives sorting and scrolling.
-        {"repeatCell": {
-            "range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": 1},
-            "cell": {"userEnteredFormat": {
-                "textFormat": {"bold": True},
-                "backgroundColor": {"red": 0.95, "green": 0.95, "blue": 0.95},
-                "verticalAlignment": "MIDDLE",
-            }},
-            "fields": "userEnteredFormat(textFormat,backgroundColor,verticalAlignment)",
-        }},
+    whole = {"sheetId": sid, "startRowIndex": 0, "endRowIndex": STYLED_ROWS,
+             "startColumnIndex": 0, "endColumnIndex": n}
+    data = dict(whole, startRowIndex=1)
+
+    def column(name, **extra):
+        return {"sheetId": sid, "startRowIndex": extra.pop("from_row", 1),
+                "endRowIndex": STYLED_ROWS,
+                "startColumnIndex": sheet.INDEX[name],
+                "endColumnIndex": sheet.INDEX[name] + 1}
+
+    requests = clear_existing(tab, sid)
+
+    requests += [
+        # Gridlines off. With banding for separation this reads as a designed
+        # table rather than an infinite spreadsheet.
         {"updateSheetProperties": {
-            "properties": {"sheetId": sid, "gridProperties": {"frozenRowCount": 1}},
-            "fields": "gridProperties.frozenRowCount",
+            "properties": {"sheetId": sid,
+                           "gridProperties": {"hideGridlines": True,
+                                              "frozenRowCount": 1,
+                                              "frozenColumnCount": FROZEN_COLUMNS}},
+            "fields": ("gridProperties.hideGridlines,"
+                       "gridProperties.frozenRowCount,"
+                       "gridProperties.frozenColumnCount"),
         }},
-        # Real checkboxes in column A, so reviewers click rather than type.
-        {"setDataValidation": {
-            "range": {"sheetId": sid, "startRowIndex": 1,
-                      "startColumnIndex": sheet.INDEX["Approve"],
-                      "endColumnIndex": sheet.INDEX["Approve"] + 1},
-            "rule": {"condition": {"type": "BOOLEAN"}, "showCustomUi": True},
+        # One typeface, one size, vertically centred - rows are tall enough
+        # that top-aligned text would float oddly above the flyer.
+        {"repeatCell": {
+            "range": whole,
+            "cell": {"userEnteredFormat": {
+                "textFormat": {"fontFamily": FONT, "fontSize": 10},
+                "verticalAlignment": "MIDDLE",
+                "horizontalAlignment": "LEFT",
+            }},
+            "fields": ("userEnteredFormat(textFormat,verticalAlignment,"
+                       "horizontalAlignment)"),
         }},
-        # Addresses and notes wrap instead of spilling across neighbours.
+        {"repeatCell": {
+            "range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": 1,
+                      "startColumnIndex": 0, "endColumnIndex": n},
+            "cell": {"userEnteredFormat": {
+                "backgroundColor": HEADER_BG,
+                "textFormat": {"fontFamily": FONT, "fontSize": 10,
+                               "bold": True, "foregroundColor": HEADER_FG},
+                "verticalAlignment": "MIDDLE",
+                "horizontalAlignment": "LEFT",
+            }},
+            "fields": ("userEnteredFormat(backgroundColor,textFormat,"
+                       "verticalAlignment,horizontalAlignment)"),
+        }},
+        {"updateDimensionProperties": {
+            "range": {"sheetId": sid, "dimension": "ROWS",
+                      "startIndex": 0, "endIndex": 1},
+            "properties": {"pixelSize": HEADER_HEIGHT},
+            "fields": "pixelSize",
+        }},
+        # Quiet stripes so the eye can follow a row across 13 columns.
+        {"addBanding": {"bandedRange": {
+            "range": data,
+            "rowProperties": {"firstBandColor": BAND_A,
+                              "secondBandColor": BAND_B},
+        }}},
+        # Long values wrap instead of spilling over their neighbours.
         {"repeatCell": {
             "range": {"sheetId": sid, "startRowIndex": 1,
+                      "endRowIndex": STYLED_ROWS,
                       "startColumnIndex": sheet.INDEX["Address"],
-                      "endColumnIndex": sheet.INDEX["Notes"] + 1},
-            "cell": {"userEnteredFormat": {"wrapStrategy": "WRAP",
-                                           "verticalAlignment": "MIDDLE"}},
-            "fields": "userEnteredFormat(wrapStrategy,verticalAlignment)",
+                      "endColumnIndex": sheet.INDEX["Check"] + 1},
+            "cell": {"userEnteredFormat": {"wrapStrategy": "WRAP"}},
+            "fields": "userEnteredFormat.wrapStrategy",
+        }},
+        {"repeatCell": {
+            "range": column("Tag"),
+            "cell": {"userEnteredFormat": {
+                "textFormat": {"fontFamily": FONT, "fontSize": 10, "bold": True}}},
+            "fields": "userEnteredFormat.textFormat",
+        }},
+        {"repeatCell": {
+            "range": column("Link"),
+            "cell": {"userEnteredFormat": {
+                "textFormat": {"fontFamily": FONT, "fontSize": 9,
+                               "foregroundColor": LINK}}},
+            "fields": "userEnteredFormat.textFormat",
+        }},
+        {"repeatCell": {
+            "range": column("Queued"),
+            "cell": {"userEnteredFormat": {
+                "textFormat": {"fontFamily": FONT, "fontSize": 9,
+                               "foregroundColor": MUTED}}},
+            "fields": "userEnteredFormat.textFormat",
+        }},
+        # Real checkboxes, so reviewing is one click.
+        {"setDataValidation": {
+            "range": column("Approve"),
+            "rule": {"condition": {"type": "BOOLEAN"}, "showCustomUi": True},
         }},
         # Source is bookkeeping, not for humans.
         {"updateDimensionProperties": {
@@ -108,22 +193,36 @@ def main():
         }},
     ]
 
-    # Make the rows that already hold data tall enough to read a flyer. New
-    # rows size themselves as intake.py writes them, so the sheet never ends
-    # up with a long tail of tall empty rows.
-    existing = len(sheet.read_rows(svc))
-    if existing:
+    for name in CENTRED:
+        requests.append({"repeatCell": {
+            "range": column(name),
+            "cell": {"userEnteredFormat": {"horizontalAlignment": "CENTER"}},
+            "fields": "userEnteredFormat.horizontalAlignment",
+        }})
+
+    for name, width in WIDTHS.items():
         requests.append({"updateDimensionProperties": {
-            "range": {"sheetId": sid, "dimension": "ROWS",
-                      "startIndex": 1, "endIndex": 1 + existing},
-            "properties": {"pixelSize": FLYER_ROW_HEIGHT},
+            "range": {"sheetId": sid, "dimension": "COLUMNS",
+                      "startIndex": sheet.INDEX[name],
+                      "endIndex": sheet.INDEX[name] + 1},
+            "properties": {"pixelSize": width},
             "fields": "pixelSize",
         }})
 
-    def col_range(name):
-        return {"sheetId": sid, "startRowIndex": 1, "endRowIndex": DATA_ROWS,
-                "startColumnIndex": sheet.INDEX[name],
-                "endColumnIndex": sheet.INDEX[name] + 1}
+    # Hide the empty columns past the last real one, so the sheet ends where
+    # the data ends instead of trailing off into the alphabet.
+    if total_columns > n:
+        requests.append({"updateDimensionProperties": {
+            "range": {"sheetId": sid, "dimension": "COLUMNS",
+                      "startIndex": n, "endIndex": total_columns},
+            "properties": {"hiddenByUser": True},
+            "fields": "hiddenByUser",
+        }})
+
+    # --- colour rules -----------------------------------------------------
+    # $L is Source. Every rule is gated on it so that empty rows, of which a
+    # new sheet has a thousand, stay plain.
+    HAS_DATA = '$L2<>""'
 
     def rule(index, ranges, formula, colour):
         return {"addConditionalFormatRule": {"index": index, "rule": {
@@ -135,36 +234,28 @@ def main():
             },
         }}}
 
-    # $L is Source: only rows that actually hold a submission. Without this
-    # every empty row in the sheet matches and the whole thing turns amber.
-    HAS_DATA = '$L2<>""'
-    rules = [
-        # Published rows go green and stop asking for attention. First, so a
-        # published row doesn't also light up amber.
-        (0, [{"sheetId": sid, "startRowIndex": 1, "endRowIndex": DATA_ROWS,
-              "endColumnIndex": n}],
-         f'=AND({HAS_DATA},REGEXMATCH($B2&"","^Posted"))', GREEN),
-        # A required field the parser couldn't fill: flag that cell only.
-        (1, [col_range("Tag")], f'=AND({HAS_DATA},$C2="")', AMBER),
-        (2, [col_range("Date")], f'=AND({HAS_DATA},$D2="")', AMBER),
-        (3, [col_range("Start PT")], f'=AND({HAS_DATA},$E2="")', AMBER),
-        # Address empty, or missing the comma-separated shape an FFXIV
-        # address has (datacenter, world, district, ward, plot).
-        (4, [col_range("Address")],
+    for index, ranges, formula, colour in [
+        # Published first, so a finished row doesn't also light up amber.
+        (0, [data], f'=AND({HAS_DATA},REGEXMATCH($B2&"","^Posted"))', GREEN),
+        (1, [column("Tag")], f'=AND({HAS_DATA},$C2="")', AMBER),
+        (2, [column("Date")], f'=AND({HAS_DATA},$D2="")', AMBER),
+        (3, [column("Start PT")], f'=AND({HAS_DATA},$E2="")', AMBER),
+        # Empty, or lacking the comma-separated shape of an FFXIV address.
+        (4, [column("Address")],
          f'=AND({HAS_DATA},OR($H2="",LEN($H2)-LEN(SUBSTITUTE($H2,",",""))<3))',
          AMBER),
-        # Anything the parser explicitly flagged.
-        (5, [col_range("Check")], f'=AND({HAS_DATA},$K2<>"")', AMBER),
-    ]
-    for index, ranges, formula, colour in rules:
+        (5, [column("Check")], f'=AND({HAS_DATA},$K2<>"")', AMBER),
+    ]:
         requests.append(rule(index, ranges, formula, colour))
 
-    for name, width in WIDTHS.items():
+    # Rows already holding data get the taller height. New rows size
+    # themselves as intake.py writes them, so there's no tall empty tail.
+    existing = len(sheet.read_rows(svc))
+    if existing:
         requests.append({"updateDimensionProperties": {
-            "range": {"sheetId": sid, "dimension": "COLUMNS",
-                      "startIndex": sheet.INDEX[name],
-                      "endIndex": sheet.INDEX[name] + 1},
-            "properties": {"pixelSize": width},
+            "range": {"sheetId": sid, "dimension": "ROWS",
+                      "startIndex": 1, "endIndex": 1 + existing},
+            "properties": {"pixelSize": ROW_HEIGHT},
             "fields": "pixelSize",
         }})
 
@@ -172,8 +263,8 @@ def main():
         spreadsheetId=sheet.spreadsheet_id(), body={"requests": requests},
     ).execute()
 
-    print(f"'{sheet.TAB}' is ready: {len(sheet.COLUMNS)} columns, "
-          f"checkboxes in A, {existing} data row(s) resized.")
+    print(f"'{sheet.TAB}' styled: {n} columns, checkboxes in A, "
+          f"{existing} data row(s) resized.")
     print(f"https://docs.google.com/spreadsheets/d/{sheet.spreadsheet_id()}")
     return 0
 
