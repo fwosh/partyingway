@@ -21,20 +21,21 @@ ARCHIVE_TAB = os.environ.get("SHEET_ARCHIVE_TAB", "Archive")
 # Column order. The scripts address cells by these names, so if you rearrange
 # columns in the sheet, rearrange them here too (and re-run setup_sheet.py).
 COLUMNS = [
-    "Approve",      # A  checkbox - the only thing a reviewer touches
+    "Approve",      # A  checkbox: publish this one
     "Status",       # B  written back by publish.py
-    "Tag",          # C
-    "Date",         # D  YYYY-MM-DD, Pacific
-    "Start",        # E  HH:MM in the host's own timezone, NOT converted
-    "End",          # F  HH:MM, optional
-    "Zone",         # G  IANA zone those times are in
-    "As written",   # H  the time exactly as the post worded it
-    "Address",      # I  FFXIV location
+    "Archive",      # C  checkbox: file it away without publishing
+    "Tag",          # D
+    "Date",         # E  YYYY-MM-DD, Pacific
+    "Start",        # F  HH:MM in the host's own timezone, NOT converted
+    "End",          # G  HH:MM, optional
+    "Zone",         # H  IANA zone those times are in
+    "As written",   # I  the time exactly as the post worded it
+    "Address",      # J  FFXIV location
     "Link",         # I  the post being advertised
     "Flyer",        # J  =IMAGE() so the graphic shows in the sheet
     "Check",        # K  blank unless the parser hit a real problem
-    "Source",       # M  AT-URI, the dedupe key
-    "Queued",       # M
+    "Source",       # N  AT-URI, the dedupe key
+    "Queued",       # O
 ]
 INDEX = {name: i for i, name in enumerate(COLUMNS)}
 LAST_COL = chr(ord("A") + len(COLUMNS) - 1)
@@ -156,7 +157,7 @@ def read_sources(svc=None):
     return found
 
 
-def move_to_archive(row_numbers, svc=None, sheet_id=None, archive_id=None):
+def move_to_archive(row_numbers, svc=None, sheet_id=None):
     """Move whole rows out of the queue, preserving their =IMAGE() formulas.
 
     Rows are deleted bottom-up: deleting row 5 first would shift every row
@@ -209,6 +210,65 @@ def set_cell(row_number, column, value, svc=None):
     ).execute()
 
 
-def is_ticked(row):
-    value = row.get("Approve")
+def is_ticked(row, column="Approve"):
+    value = row.get(column)
     return value is True or str(value).strip().upper() == "TRUE"
+
+
+# --- timezones -------------------------------------------------------------
+# Reviewers shouldn't have to type "America/Los_Angeles". The sheet shows a
+# short label; everything resolves to a proper Area/Location zone, which is
+# what actually tracks daylight saving. The bare tzdata abbreviations (EST,
+# PST) are deliberately NOT used as zones: they are fixed offsets that ignore
+# DST, so an event in July would land an hour out.
+ZONE_LABELS = [                       # (label, IANA) - dropdown order
+    ("PT", "America/Los_Angeles"),
+    ("MT", "America/Denver"),
+    ("CT", "America/Chicago"),
+    ("ET", "America/New_York"),
+    ("AKT", "America/Anchorage"),
+    ("HT", "Pacific/Honolulu"),
+    ("UTC (Server Time)", "UTC"),
+    ("Europe/London", "Europe/London"),
+    ("Europe/Paris", "Europe/Paris"),
+    ("Asia/Tokyo", "Asia/Tokyo"),
+    ("Australia/Sydney", "Australia/Sydney"),
+]
+LABEL_FOR_ZONE = {iana: label for label, iana in ZONE_LABELS}
+
+# Everything a host or reviewer might plausibly write, folded to one zone.
+ZONE_ALIASES = {}
+for _label, _iana in ZONE_LABELS:
+    ZONE_ALIASES[_label.upper()] = _iana
+    ZONE_ALIASES[_iana.upper()] = _iana
+ZONE_ALIASES.update({
+    "PT": "America/Los_Angeles", "PST": "America/Los_Angeles",
+    "PDT": "America/Los_Angeles", "PACIFIC": "America/Los_Angeles",
+    "MT": "America/Denver", "MST": "America/Denver",
+    "MDT": "America/Denver", "MOUNTAIN": "America/Denver",
+    "CT": "America/Chicago", "CST": "America/Chicago",
+    "CDT": "America/Chicago", "CENTRAL": "America/Chicago",
+    "ET": "America/New_York", "EST": "America/New_York",
+    "EDT": "America/New_York", "EASTERN": "America/New_York",
+    "AKT": "America/Anchorage", "AKST": "America/Anchorage",
+    "AKDT": "America/Anchorage",
+    "HT": "Pacific/Honolulu", "HST": "Pacific/Honolulu",
+    "ST": "UTC", "SERVER TIME": "UTC", "SERVERTIME": "UTC",
+    "UTC": "UTC", "GMT": "UTC", "ZULU": "UTC",
+    "BST": "Europe/London", "JST": "Asia/Tokyo",
+    "CET": "Europe/Paris", "CEST": "Europe/Paris",
+    "AEST": "Australia/Sydney", "AEDT": "Australia/Sydney",
+})
+
+
+def zone_label(iana):
+    """The short form to show in the sheet, falling back to the full name."""
+    return LABEL_FOR_ZONE.get((iana or "").strip(), (iana or "").strip())
+
+
+def resolve_zone(value):
+    """A sheet cell -> an IANA zone name, or None if it means nothing."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return ZONE_ALIASES.get(text.upper()) or (text if "/" in text else None)

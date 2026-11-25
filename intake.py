@@ -108,6 +108,43 @@ def get_post(uri):
     return posts[0] if posts else None
 
 
+def author_followups(uri, author_did, limit=8):
+    """Text of replies the HOST added under their own announcement.
+
+    Hosts often put the time in a reply rather than editing the post. Only
+    the root author's replies count - anyone else in the thread is chatter,
+    and trusting it would let a stranger set an event's time. Text only, by
+    design: images down a thread are usually reaction art, and reading them
+    would multiply the cost of every parse.
+    """
+    try:
+        resp = requests.get(
+            f"{APPVIEW}/xrpc/app.bsky.feed.getPostThread",
+            params={"uri": uri, "depth": 6, "parentHeight": 0}, timeout=30,
+        )
+        resp.raise_for_status()
+        thread = resp.json().get("thread") or {}
+    except (requests.RequestException, ValueError) as exc:
+        print(f"    couldn't read the thread: {exc}")
+        return []
+
+    found = []
+
+    def walk(node):
+        for reply in (node.get("replies") or []):
+            if len(found) >= limit:
+                return
+            post = reply.get("post") or {}
+            did = ((post.get("author") or {}).get("did") or "")
+            text = ((post.get("record") or {}).get("text") or "").strip()
+            if did == author_did and text:
+                found.append(text)
+            walk(reply)
+
+    walk(thread)
+    return found
+
+
 def post_images(post):
     """Covers plain image embeds and the record-with-media shape a post gets
     when it quotes something and carries art."""
@@ -215,7 +252,7 @@ comment. Leave `warning` empty unless something genuinely conflicts.
 """
 
 
-def parse_post(post):
+def parse_post(post, followups=()):
     now_pt = datetime.now(PACIFIC)
     text = (post.get("record") or {}).get("text", "")
     all_images = post_images(post)
@@ -230,12 +267,24 @@ def parse_post(post):
         if image["alt"]:
             content.append({"type": "text",
                             "text": f"(alt text for the image above: {image['alt']})"})
-    content.append({"type": "text", "text": (
+    prompt = (
         f"Current date and time in Pacific: {now_pt.strftime('%Y-%m-%d %H:%M %Z')}\n"
         f"Post author: @{(post.get('author') or {}).get('handle', '')}\n"
         f"Attached graphics: {len(images)}\n\n"
         f"POST TEXT (authoritative):\n{text or '(no text)'}"
-    )})
+    )
+    if followups:
+        joined = "\n---\n".join(followups)
+        prompt += (
+            "\n\nLATER REPLIES BY THE SAME HOST, oldest first. Hosts often "
+            "add or correct the date, time or address here rather than "
+            "editing the post. Treat these as authoritative too, and where "
+            "a reply contradicts the original post, the reply wins - say so "
+            "in warning. Only text was read from these; any images they "
+            "carry were not.\n"
+            f"{joined}"
+        )
+    content.append({"type": "text", "text": prompt})
 
     resp = requests.post(
         "https://api.anthropic.com/v1/messages",
@@ -271,11 +320,12 @@ def build_row(fields, post, link):
     return {
         "Approve": False,
         "Status": "",
+        "Archive": False,
         "Tag": fields.get("tag") or "",
         "Date": fields.get("date") or "",
         "Start": fields.get("start_local") or "",
         "End": fields.get("end_local") or "",
-        "Zone": fields.get("timezone") or "",
+        "Zone": sheet.zone_label(fields.get("timezone") or ""),
         "As written": fields.get("time_as_written") or "",
         "Address": fields.get("address") or "",
         "Link": link,
@@ -321,9 +371,11 @@ def main():
             continue
 
         link = web_url(post)
-        print(f"  parsing {link}")
+        followups = author_followups(uri, (post.get("author") or {}).get("did", ""))
+        note = f", {len(followups)} host reply/replies" if followups else ""
+        print(f"  parsing {link}{note}")
         try:
-            fields = parse_post(post)
+            fields = parse_post(post, followups)
         except Exception as exc:
             # One unreadable post shouldn't cost us the rest of the batch.
             # It isn't recorded, so the next run tries it again.

@@ -39,39 +39,42 @@ SKIPPED = rgb("#F3F4F6")   # not an event: present, but quiet
 LINK = rgb("#2563EB")
 
 WIDTHS = {  # pixels, by column name
-    "Approve": 80, "Status": 120, "Tag": 130, "Date": 100, "Start": 80,
-    "End": 80, "Zone": 150, "As written": 110, "Address": 250, "Link": 170,
-    "Flyer": 240, "Check": 200, "Source": 60, "Queued": 120,
+    "Approve": 80, "Status": 120, "Archive": 80, "Tag": 130, "Date": 100,
+    "Start": 80, "End": 80, "Zone": 130, "As written": 110, "Address": 250,
+    "Link": 170, "Flyer": 240, "Check": 200, "Source": 60, "Queued": 120,
 }
-CENTRED = ("Approve", "Date", "Start", "End", "Queued")
+CENTRED = ("Approve", "Archive", "Date", "Start", "End", "Zone", "Queued")
 # Column names that were called something else in an earlier layout. Used
 # only to recognise an existing sheet so its data doesn't get shifted.
 RENAMED_FROM = {"Start PT": "Start", "End PT": "End"}
 ROW_HEIGHT = int(os.environ.get("FLYER_ROW_HEIGHT", "240"))
 HEADER_HEIGHT = 44
-FROZEN_COLUMNS = 3              # Approve, Status, Tag stay put when scrolling
+FROZEN_COLUMNS = 4              # the two checkboxes, Status and Tag stay put
 STYLED_ROWS = 2000
 
 
 def ensure_archive(svc, existing_titles):
     """The archive is a plain dump: same columns, no checkboxes, no colour
     rules. It exists so dedupe survives rows leaving the queue."""
-    if sheet.ARCHIVE_TAB in existing_titles:
-        return
-    svc.spreadsheets().batchUpdate(
-        spreadsheetId=sheet.spreadsheet_id(),
-        body={"requests": [{"addSheet": {"properties": {
-            "title": sheet.ARCHIVE_TAB,
-            "gridProperties": {"frozenRowCount": 1},
-        }}}]},
-    ).execute()
+    if sheet.ARCHIVE_TAB not in existing_titles:
+        svc.spreadsheets().batchUpdate(
+            spreadsheetId=sheet.spreadsheet_id(),
+            body={"requests": [{"addSheet": {"properties": {
+                "title": sheet.ARCHIVE_TAB,
+                "gridProperties": {"frozenRowCount": 1},
+            }}}]},
+        ).execute()
+        print(f"created the '{sheet.ARCHIVE_TAB}' tab")
+
+    # Rewrite the header every time. Rows arrive here already in the queue's
+    # column order, so a stale header would describe them wrongly - and
+    # read_sources looks up Source by position, so it would stop finding it.
     svc.spreadsheets().values().update(
         spreadsheetId=sheet.spreadsheet_id(),
         range=f"{sheet.ARCHIVE_TAB}!A1:{sheet.LAST_COL}1",
         valueInputOption="RAW",
         body={"values": [sheet.COLUMNS]},
     ).execute()
-    print(f"created the '{sheet.ARCHIVE_TAB}' tab")
 
 
 def migrate_columns(svc, sid):
@@ -245,10 +248,29 @@ def main():
                                "foregroundColor": MUTED}}},
             "fields": "userEnteredFormat.textFormat",
         }},
-        # Real checkboxes, so reviewing is one click.
+        # Real checkboxes, so reviewing is one click. Status sits between
+        # them deliberately: Approve posts, Archive files away, and they
+        # should not be adjacent targets.
         {"setDataValidation": {
             "range": column("Approve"),
             "rule": {"condition": {"type": "BOOLEAN"}, "showCustomUi": True},
+        }},
+        {"setDataValidation": {
+            "range": column("Archive"),
+            "rule": {"condition": {"type": "BOOLEAN"}, "showCustomUi": True},
+        }},
+        # A dropdown, so nobody has to remember "America/Los_Angeles".
+        # strict=False: a zone not on the list still goes through with a
+        # warning rather than being blocked, since publish.py understands
+        # plenty of spellings the list doesn't show.
+        {"setDataValidation": {
+            "range": column("Zone"),
+            "rule": {
+                "condition": {"type": "ONE_OF_LIST", "values": [
+                    {"userEnteredValue": label} for label, _ in sheet.ZONE_LABELS]},
+                "showCustomUi": True,
+                "strict": False,
+            },
         }},
         # Source is bookkeeping, not for humans.
         {"updateDimensionProperties": {
@@ -340,7 +362,8 @@ def main():
          f'=AND({HAS_DATA},REGEXMATCH({ref("Status")}&"","^Posted"))', GREEN),
         # Not an art party: kept so the mention is never re-parsed, but
         # greyed so it doesn't read as work waiting to be done.
-        (1, [data], f'=AND({HAS_DATA},{ref("Status")}="Not an event")', SKIPPED),
+        (1, [data], f'=OR(AND({HAS_DATA},{ref("Status")}="Not an event"),'
+                    f'AND({HAS_DATA},{ref("Archive")}=TRUE))', SKIPPED),
         (2, [column("Tag")], f'=AND({AWAITING},{ref("Tag")}="")', AMBER),
         (3, [column("Date")], f'=AND({AWAITING},{ref("Date")}="")', AMBER),
         (4, [column("Start")], f'=AND({AWAITING},{ref("Start")}="")', AMBER),

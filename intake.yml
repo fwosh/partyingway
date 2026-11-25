@@ -1,0 +1,60 @@
+name: Art party intake
+
+on:
+  schedule:
+    # Every 20 minutes, deliberately off the hour. GitHub's scheduler is
+    # busiest at :00 and :30, and runs queued then are the ones that get
+    # delayed or dropped.
+    - cron: "7,27,47 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print rows instead of adding them to the sheet"
+        type: boolean
+        default: true
+      lookback_hours:
+        description: "How far back to scan mentions"
+        type: string
+        default: "48"
+      model:
+        description: "Model to parse with"
+        type: choice
+        default: claude-sonnet-5-5
+        options:
+          - claude-sonnet-5-5
+          - claude-haiku-5-5
+      ignore_seen:
+        description: "Re-parse posts already on the sheet (forces dry run)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: art-party-intake
+  cancel-in-progress: false
+
+jobs:
+  intake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Scan mentions and queue submissions
+        env:
+          BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
+          BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          LOOKBACK_HOURS: ${{ inputs.lookback_hours || '48' }}
+          IGNORE_SEEN: ${{ inputs.ignore_seen }}
+          # Scheduled runs take the default; a manual run can override it.
+          MODEL: ${{ inputs.model || 'claude-sonnet-5-5' }}
+        run: python intake.py

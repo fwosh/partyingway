@@ -103,23 +103,21 @@ def event_zone(row):
     this zone attached, so Calendar does the converting - correctly, for
     every viewer, with daylight saving handled for the event's own date.
     """
-    name = clean(row["Zone"]) or DEFAULT_TIMEZONE
+    written = clean(row["Zone"]) or DEFAULT_TIMEZONE
+    if not written:
+        raise RowProblem("needs zone")
+    # "PT", "EST", "Server Time" and America/New_York all land on a proper
+    # Area/Location zone. That matters: the bare tzdata abbreviations are
+    # fixed offsets that ignore daylight saving, so EST in July would be an
+    # hour out. Mapping them beats both rejecting and trusting them.
+    name = sheet.resolve_zone(written)
     if not name:
-        raise RowProblem("needs zone (no timezone given and no default set)")
-    # Abbreviations like EST are real tzdata entries, but they're FIXED
-    # offsets with no daylight saving - an event in July would land an hour
-    # out. Insist on the Area/Location form, which tracks DST properly.
-    if name.upper() == "UTC":
-        name = "UTC"  # ZoneInfo is case-sensitive; "utc" would fail
-    if "/" not in name and name != "UTC":
-        raise RowProblem(f"{name!r} is an abbreviation, which ignores daylight "
-                         f"saving; use the Area/Location form "
-                         f"(America/New_York, not EST)")
+        raise RowProblem(f"{written!r} isn't a timezone we recognise - "
+                         f"pick one from the dropdown")
     try:
         return name, ZoneInfo(name)
     except Exception:
-        raise RowProblem(f"{name!r} isn't a timezone name "
-                         f"(expected something like America/New_York)")
+        raise RowProblem(f"{name!r} isn't a known timezone")
 
 
 def parse_when(row):
@@ -275,8 +273,12 @@ def pending(row):
     flagged cell is enough to make it retry.
 
     Any other Status - "Posted ...", "Not an event", or anything a reviewer
-    typed by hand - takes the row out of consideration permanently.
+    typed by hand - takes the row out of consideration permanently. So does
+    the Archive box: filing something away should never also post it, even
+    if Approve was ticked first by mistake.
     """
+    if sheet.is_ticked(row, "Archive"):
+        return False
     status = clean(row["Status"])
     return sheet.is_ticked(row) and (not status or status.startswith("needs"))
 
@@ -301,15 +303,36 @@ def stale(row, now):
 
 
 def sweep(svc):
-    """Move finished, aged rows out of the queue so it stays short."""
+    """Clear the queue of anything that doesn't need a reviewer any more.
+
+    Two ways a row leaves: a human ticked Archive, which is immediate and
+    needs no reason; or it finished on its own and has since aged out.
+    """
     now = datetime.now(PACIFIC)
-    rows = [r for r in sheet.read_rows(svc) if finished(r) and stale(r, now)]
+    by_hand, aged = [], []
+    for row in sheet.read_rows(svc):
+        if sheet.is_ticked(row, "Archive"):
+            by_hand.append(row)
+        elif finished(row) and stale(row, now):
+            aged.append(row)
+
+    # A hand-archived row usually has no Status; say why it left, so the
+    # archive reads as a record rather than a pile.
+    for row in by_hand:
+        if not clean(row["Status"]):
+            sheet.set_cell(row["_row"], "Status", "Archived by hand", svc)
+
+    rows = by_hand + aged
     if not rows:
         return
     moved = sheet.move_to_archive(
-        [r["_row"] for r in rows], svc,
-        sheet_id=sheet.tab_id(svc), archive_id=None)
-    print(f"archived {moved} finished row(s) older than {ARCHIVE_AFTER_DAYS} days")
+        [r["_row"] for r in rows], svc, sheet_id=sheet.tab_id(svc))
+    parts = []
+    if by_hand:
+        parts.append(f"{len(by_hand)} ticked for archive")
+    if aged:
+        parts.append(f"{len(aged)} finished over {ARCHIVE_AFTER_DAYS} days ago")
+    print(f"archived {moved} row(s): {', '.join(parts)}")
 
 
 def main():

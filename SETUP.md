@@ -197,16 +197,40 @@ Check `RESPONSES_COLUMNS` in `publish.py` matches your column order.
 tick Approve. Anyone you share the sheet with can review — they don't need
 GitHub, Google Cloud, or anything else.
 
-**Amber row** = the parser left a required field blank. Fill it in and tick.
+**Amber cell** = that specific field is empty, or the address doesn't look
+like a full FFXIV address. Fix it and tick. Empty rows stay white.
 
-**Status says `needs start pt`** = publish tried and stopped. Fix the cell;
+**Check column** = the parser found a genuine conflict, usually the post text
+and the flyer disagreeing. Blank the vast majority of the time.
+
+**Status says `needs start`** = publish tried and stopped. Fix the cell;
 it retries on the next run, no need to untick anything.
+
+**Times are stored in the host's own timezone, not converted.** If someone
+says 5PM EST, the sheet holds `17:00` and `ET`, and Google Calendar shows
+2PM to you and 5PM to them.
+
+**Zone is a dropdown** — PT, MT, CT, ET, AKT, HT, UTC (Server Time), and a
+few European and Asian zones. You can also type: `PST`, `EST`, `Eastern`,
+`Server Time`, `BST` and full names like `Europe/Berlin` all resolve
+correctly. Behind the scenes everything maps to a daylight-saving-aware
+zone, so `EST` in July still comes out right.
 
 **Status says `needs retry: ...`** = something failed mid-publish (API
 hiccup, network). It retries by itself.
 
-**To reject a submission**, just leave it unticked. It stays on the sheet as
-a record and is never queued again. Delete the row if you want it gone.
+**To reject a submission**, leave Approve unticked. It stays on the sheet
+and is never published.
+
+**To get it out of your view**, tick **Archive**. The row moves to the
+Archive tab on the next publish run — no waiting, no reason needed. Use it
+for things you posted by hand, recurring parties you've already dealt with,
+or anything you don't want to look at again. Archive beats Approve: a row
+with both ticked is filed, not published.
+
+Archived rows still count for dedupe, so the same post is never pulled back
+in. That's why archiving is better than deleting the row — a deleted row
+would look brand new to the next intake run.
 
 ## Changing things
 
