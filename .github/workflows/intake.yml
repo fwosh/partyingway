@@ -2,8 +2,10 @@ name: Art party intake
 
 on:
   schedule:
-    # Every 20 minutes. Submissions only need queueing well before the party.
-    - cron: "*/30 * * * *"
+    # Every 20 minutes, deliberately off the hour. GitHub's scheduler is
+    # busiest at :00 and :30, and runs queued then are the ones that get
+    # delayed or dropped.
+    - cron: "7,27,47 * * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -54,5 +56,5 @@ jobs:
           LOOKBACK_HOURS: ${{ inputs.lookback_hours || '48' }}
           IGNORE_SEEN: ${{ inputs.ignore_seen }}
           # Scheduled runs take the default; a manual run can override it.
-          MODEL: ${{ inputs.model || 'claude-haiku-5-5' }}
+          MODEL: ${{ inputs.model || 'claude-sonnet-5-5' }}
         run: python intake.py

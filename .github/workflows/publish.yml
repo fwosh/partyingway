@@ -3,7 +3,8 @@ name: Publish approved art parties
 on:
   schedule:
     # Every 10 minutes, so a tick turns into a repost reasonably quickly.
-    - cron: "*/10 * * * *"
+    # Offset off :00 and :30, which is when GitHub's scheduler is busiest.
+    - cron: "3,13,23,33,43,53 * * * *"
   workflow_dispatch:
     inputs:
       dry_run:
