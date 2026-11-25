@@ -221,18 +221,21 @@ def is_ticked(row, column="Approve"):
 # what actually tracks daylight saving. The bare tzdata abbreviations (EST,
 # PST) are deliberately NOT used as zones: they are fixed offsets that ignore
 # DST, so an event in July would land an hour out.
+# Deliberately short: the zones FFXIV art parties actually happen in, not
+# the full tzdata list. The label carries both forms so a reviewer can scan
+# for the abbreviation they know while the sheet stores something precise.
 ZONE_LABELS = [                       # (label, IANA) - dropdown order
-    ("PT", "America/Los_Angeles"),
-    ("MT", "America/Denver"),
-    ("CT", "America/Chicago"),
-    ("ET", "America/New_York"),
-    ("AKT", "America/Anchorage"),
-    ("HT", "Pacific/Honolulu"),
+    ("America/Los_Angeles (PT)", "America/Los_Angeles"),
+    ("America/Denver (MT)", "America/Denver"),
+    ("America/Chicago (CT)", "America/Chicago"),
+    ("America/New_York (ET)", "America/New_York"),
+    ("America/Anchorage (AKT)", "America/Anchorage"),
+    ("Pacific/Honolulu (HT)", "Pacific/Honolulu"),
     ("UTC (Server Time)", "UTC"),
-    ("Europe/London", "Europe/London"),
-    ("Europe/Paris", "Europe/Paris"),
-    ("Asia/Tokyo", "Asia/Tokyo"),
-    ("Australia/Sydney", "Australia/Sydney"),
+    ("Europe/London (GMT/BST)", "Europe/London"),
+    ("Europe/Paris (CET)", "Europe/Paris"),
+    ("Asia/Tokyo (JST)", "Asia/Tokyo"),
+    ("Australia/Sydney (AET)", "Australia/Sydney"),
 ]
 LABEL_FOR_ZONE = {iana: label for label, iana in ZONE_LABELS}
 
@@ -267,8 +270,29 @@ def zone_label(iana):
 
 
 def resolve_zone(value):
-    """A sheet cell -> an IANA zone name, or None if it means nothing."""
+    """A sheet cell -> an IANA zone name, or None if it means nothing.
+
+    Accepts the dropdown's full label ("America/New_York (ET)"), either half
+    of it on its own, and the shorthand a host might type ("EST", "Server
+    Time"). The abbreviations resolve to Area/Location zones rather than
+    being used as zones themselves, since the bare tzdata ones are fixed
+    offsets that ignore daylight saving.
+    """
     text = str(value or "").strip()
     if not text:
         return None
-    return ZONE_ALIASES.get(text.upper()) or (text if "/" in text else None)
+
+    candidates = [text]
+    if "(" in text:
+        candidates.append(text.split("(", 1)[0].strip())          # before the paren
+        candidates.append(text.split("(", 1)[1].rstrip(") ").strip())  # inside it
+    for candidate in candidates:
+        if not candidate:
+            continue
+        hit = ZONE_ALIASES.get(candidate.upper())
+        if hit:
+            return hit
+    for candidate in candidates:
+        if "/" in candidate:
+            return candidate
+    return None

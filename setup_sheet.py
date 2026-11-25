@@ -40,10 +40,10 @@ LINK = rgb("#2563EB")
 
 WIDTHS = {  # pixels, by column name
     "Approve": 80, "Status": 120, "Archive": 80, "Tag": 130, "Date": 100,
-    "Start": 80, "End": 80, "Zone": 130, "As written": 110, "Address": 250,
+    "Start": 80, "End": 80, "Zone": 210, "As written": 110, "Address": 250,
     "Link": 170, "Flyer": 240, "Check": 200, "Source": 60, "Queued": 120,
 }
-CENTRED = ("Approve", "Archive", "Date", "Start", "End", "Zone", "Queued")
+CENTRED = ("Approve", "Archive", "Date", "Start", "End", "Queued")
 # Column names that were called something else in an earlier layout. Used
 # only to recognise an existing sheet so its data doesn't get shifted.
 RENAMED_FROM = {"Start PT": "Start", "End PT": "End"}
