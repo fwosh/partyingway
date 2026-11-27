@@ -92,20 +92,95 @@ def list_mentions(session, since):
 
 
 def source_uri(notification):
-    """The post the details actually live in: the thread root for a reply,
-    or the post itself if someone tagged us in a standalone post."""
+    """The thread root for a reply, or the post itself otherwise.
+
+    Kept as the dedupe fallback: rows written before announcement_post()
+    existed recorded this, so it still has to be checked against the sheet
+    or those parties would all be parsed again.
+    """
     reply = (notification.get("record") or {}).get("reply") or {}
     return (reply.get("root") or {}).get("uri") or notification.get("uri")
 
 
-def get_post(uri):
+def candidate_uris(notification):
+    """Every post a mention might be pointing at, excluding duplicates.
+
+    Order matters only as a tiebreak later: a quoted post is the most
+    deliberate pointer, then the thread root, then the immediate parent
+    (which in a long thread is often a bystander's comment).
+    """
+    record = notification.get("record") or {}
+    reply = record.get("reply") or {}
+    embed = record.get("embed") or {}
+    # app.bsky.embed.record nests {record: {uri}}; recordWithMedia nests it
+    # one level deeper under the same key.
+    quoted = embed.get("record") or {}
+    quoted_uri = quoted.get("uri") or (quoted.get("record") or {}).get("uri")
+
+    found, uris = set(), []
+    for uri in (notification.get("uri"), quoted_uri,
+                (reply.get("root") or {}).get("uri"),
+                (reply.get("parent") or {}).get("uri")):
+        if uri and uri not in found:
+            found.add(uri)
+            uris.append(uri)
+    return uris
+
+
+def get_posts(uris):
+    """Hydrate up to 25 posts in one call, keyed by URI."""
+    if not uris:
+        return {}
     resp = requests.get(
         f"{APPVIEW}/xrpc/app.bsky.feed.getPosts",
-        params={"uris": uri}, timeout=30,
+        params={"uris": uris[:25]}, timeout=30,
     )
     resp.raise_for_status()
-    posts = resp.json().get("posts", [])
-    return posts[0] if posts else None
+    return {post["uri"]: post for post in resp.json().get("posts", [])}
+
+
+def announcement_post(notification):
+    """Of the posts a mention points at, the one actually announcing a party.
+
+    The post we were tagged ON is frequently not the one to repost. A host
+    who already posted their flier tags us underneath it with nothing but
+    "@partyingway new flier :3" - reposting that shows followers a bare
+    mention instead of the flier.
+
+    So choose by content rather than by thread position, because a flier is
+    an image:
+      1. the mention itself, if the host attached a flier to it - they meant
+         that one, even when it sits under an older flier
+      2. otherwise the first quoted/root/parent post carrying images
+      3. otherwise whichever candidate has the most text
+    Returns (post, dedupe_uris) - plural because a row may already have been
+    recorded under the thread root by an earlier version of this script.
+    """
+    uris = candidate_uris(notification)
+    posts = get_posts(uris)
+    mention = posts.get(notification.get("uri"))
+
+    chosen = None
+    if mention is not None and post_images(mention):
+        chosen = mention
+    if chosen is None:
+        for uri in uris:
+            post = posts.get(uri)
+            if post is not None and post_images(post):
+                chosen = post
+                break
+    if chosen is None:
+        ranked = sorted(
+            posts.values(),
+            key=lambda p: len(((p.get("record") or {}).get("text") or "")),
+            reverse=True,
+        )
+        chosen = ranked[0] if ranked else None
+
+    dedupe = {source_uri(notification)}
+    if chosen is not None:
+        dedupe.add(chosen["uri"])
+    return chosen, dedupe
 
 
 def author_followups(uri, author_did, limit=8):
@@ -465,22 +540,32 @@ def main():
 
     seen_this_run, parsed, failed = set(), 0, 0
     for notification in notifications:
-        uri = source_uri(notification)
-        if uri in known or uri in seen_this_run:
+        # Cheap pre-check on the thread root, so a party already on the
+        # sheet costs no API calls at all.
+        if source_uri(notification) in known | seen_this_run:
             continue  # several people can tag the same party
-        seen_this_run.add(uri)
 
         if parsed >= MAX_PARSES_PER_RUN:
             print(f"  hit the {MAX_PARSES_PER_RUN}-parse cap for this run; "
                   f"the rest will be picked up next time")
             break
 
-        post = get_post(uri)
+        post, dedupe = announcement_post(notification)
         if post is None:
-            print(f"  source post is gone, skipping: {uri}")
+            print(f"  source post is gone, skipping: "
+                  f"{notification.get('uri')}")
+            seen_this_run |= dedupe
             continue
+        if dedupe & (known | seen_this_run):
+            seen_this_run |= dedupe
+            continue
+        seen_this_run |= dedupe
 
+        uri = post["uri"]
         link = web_url(post)
+        if uri != notification.get("uri"):
+            print(f"  tagged on {notification.get('uri', '').rsplit('/', 1)[-1]}"
+                  f", announcement is {uri.rsplit('/', 1)[-1]}")
         followups = author_followups(uri, (post.get("author") or {}).get("did", ""))
         note = f", {len(followups)} host reply/replies" if followups else ""
         print(f"  parsing {link}{note}")
