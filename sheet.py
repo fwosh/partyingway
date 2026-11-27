@@ -232,13 +232,18 @@ ZONE_LABELS = [                       # (label, IANA) - dropdown order
     ("America/New_York (ET)", "America/New_York"),
     ("America/Anchorage (AKT)", "America/Anchorage"),
     ("Pacific/Honolulu (HT)", "Pacific/Honolulu"),
-    ("UTC (FFXIV Server Time)", "UTC"),
-    ("Europe/London (GMT/BST \u2014 EU parties)", "Europe/London"),
+    ("Europe/London (GMT/BST)", "Europe/London"),
     ("Europe/Paris (CET)", "Europe/Paris"),
     ("Asia/Tokyo (JST)", "Asia/Tokyo"),
     ("Australia/Sydney (AET)", "Australia/Sydney"),
 ]
 LABEL_FOR_ZONE = {iana: label for label, iana in ZONE_LABELS}
+
+# FFXIV Server Time is UTC. The sheet no longer offers UTC as a choice, so
+# intake converts ST times into this zone instead. Named rather than
+# inlined because getting the pair wrong is a silent one-hour error.
+SERVER_TIME = "UTC"
+SERVER_TIME_AS = "Europe/London"
 
 # Everything a host or reviewer might plausibly write, folded to one zone.
 ZONE_ALIASES = {}
@@ -257,12 +262,17 @@ ZONE_ALIASES.update({
     "AKT": "America/Anchorage", "AKST": "America/Anchorage",
     "AKDT": "America/Anchorage",
     "HT": "Pacific/Honolulu", "HST": "Pacific/Honolulu",
-    # FFXIV Server Time really is UTC, and UTC never shifts. But a host
-    # writing "GMT" on a flier is an EU player meaning their own clock,
-    # which is BST for half the year - so that maps to Europe/London, not
-    # to UTC. Getting this backwards puts EU parties an hour out all summer.
-    "ST": "UTC", "SERVER TIME": "UTC", "SERVERTIME": "UTC",
-    "UTC": "UTC", "ZULU": "UTC",
+    # No UTC in the sheet, by request: a feed consumer that renders a UTC
+    # event without converting shows EU readers the wrong hour all summer,
+    # and two near-identical zones in one dropdown invited mis-picks.
+    # Everything UTC-ish therefore lands on Europe/London. Server Time is
+    # still genuinely UTC, so intake.py SHIFTS the clock time when it folds
+    # an ST party into London - see server_time_to_london() there. Relabel
+    # without shifting and ST parties run an hour early from April to
+    # October.
+    "ST": "Europe/London", "SERVER TIME": "Europe/London",
+    "SERVERTIME": "Europe/London",
+    "UTC": "Europe/London", "ZULU": "Europe/London",
     "GMT": "Europe/London", "BST": "Europe/London", "JST": "Asia/Tokyo",
     "CET": "Europe/Paris", "CEST": "Europe/Paris",
     "AEST": "Australia/Sydney", "AEDT": "Australia/Sydney",

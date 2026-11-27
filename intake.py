@@ -14,7 +14,7 @@ Nothing here publishes anything. DMs are ignored by design.
 import json
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date as date_cls, datetime, time as time_cls, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import requests
@@ -179,7 +179,9 @@ EXTRACT_SCHEMA = {
                 "description": ("FFXIV location as 'Datacenter, World, District, Ward, "
                                 "Plot'. Keep apartment/subdivision detail. Empty if absent.")},
             "date": {"type": "string",
-                "description": "Event date as YYYY-MM-DD in Pacific. Empty if undeterminable."},
+                "description": ("Event date as YYYY-MM-DD, in the SAME zone as "
+                                "start_local - the date the host states, not the "
+                                "date it falls on elsewhere. Empty if undeterminable.")},
             "time_as_written": {"type": "string",
                 "description": "Start time EXACTLY as worded, e.g. '7pm EST', '19:00 ST'."},
             "timezone": {"type": "string",
@@ -331,29 +333,102 @@ def parse_post(post, followups=()):
 
 # ---------- rows ----------
 
-def check_note(fields):
+def server_time_to_london(fields):
+    """Fold a Server Time party into Europe/London, moving the clock with it.
+
+    The sheet has no UTC option any more, so an ST party has to be stored in
+    some other zone - and Server Time only equals a London clock in winter.
+    From late March to late October London is BST, an hour ahead, so simply
+    relabelling the zone would advertise the party an hour early. Shift the
+    stated times by whatever the offset is on the event's own date and the
+    instant survives the relabel.
+
+    No-ops outside that window, which is why nothing looks odd in November.
+    Returns (fields, note) - note is non-empty only when a shift happened,
+    so the reviewer can see it was deliberate and not "correct" it back.
+    """
+    if (fields.get("timezone") or "").strip() != sheet.SERVER_TIME:
+        return fields, ""
+
+    fields = dict(fields)
+    fields["timezone"] = sheet.SERVER_TIME_AS
+    source, target = ZoneInfo(sheet.SERVER_TIME), ZoneInfo(sheet.SERVER_TIME_AS)
+
+    day = parse_date(fields.get("date"))
+    start = parse_clock(fields.get("start_local"))
+    if day is None or start is None:
+        # Nothing to anchor the offset to. Leave the times alone and let a
+        # human look: a blank or unparseable date is already flagged.
+        return fields, "server time, date unclear - check the hour by hand"
+
+    def shifted(clock):
+        if clock is None:
+            return None
+        moved = datetime.combine(day, clock, tzinfo=source).astimezone(target)
+        return moved
+
+    moved_start = shifted(start)
+    if moved_start.hour == start.hour and moved_start.minute == start.minute:
+        return fields, ""                      # winter: ST and London agree
+
+    fields["start_local"] = moved_start.strftime("%H:%M")
+    moved_end = shifted(parse_clock(fields.get("end_local")))
+    if moved_end is not None:
+        fields["end_local"] = moved_end.strftime("%H:%M")
+
+    note = (f"{start.strftime('%H:%M')} server time = "
+            f"{moved_start.strftime('%H:%M')} {moved_start.tzname()} - "
+            f"do not change back")
+    if moved_start.date() != day:
+        # 23:00 ST in summer is 00:00 BST the next day. Move the date too,
+        # and say so loudly, because it now disagrees with the flyer.
+        fields["date"] = moved_start.date().isoformat()
+        note += f"; date moved to {fields['date']}"
+    return fields, note
+
+
+def parse_date(text):
+    try:
+        return date_cls.fromisoformat(str(text or "").strip())
+    except ValueError:
+        return None
+
+
+def parse_clock(text):
+    try:
+        return time_cls.fromisoformat(str(text or "").strip())
+    except ValueError:
+        return None
+
+
+def check_note(fields, extra=""):
     """What the reviewer needs flagged, recurrence first.
 
     A repeating party usually already has a hand-maintained event on the
     calendar, so publishing this one would duplicate it. Saying so here is
-    what stops that happening.
+    what stops that happening, and it names the action to take rather than
+    leaving the reviewer to work it out.
     """
     parts = []
     repeats = (fields.get("recurrence") or "").strip()
     if repeats:
-        parts.append(f"repeats {repeats} - use Repost only if it's already "
-                     f"on the calendar")
+        parts.append(f"repeats {repeats} - use Repost only, then check the "
+                     f"recurring event on the calendar")
     warning = (fields.get("warning") or "").strip()
     if warning:
         parts.append(warning)
+    if extra:
+        parts.append(extra)
     return "; ".join(parts)
 
 
 def build_row(fields, post, link):
     images = post_images(post)
     flyer = f'=IMAGE("{images[0]["url"]}", 1)' if images else ""
+    fields, shift = server_time_to_london(fields)
     return {
         "Approve": False,
+        "Repost only": False,
         "Status": "",
         "Archive": False,
         "Tag": fields.get("tag") or "",
@@ -365,7 +440,7 @@ def build_row(fields, post, link):
         "Address": fields.get("address") or "",
         "Link": link,
         "Flyer": flyer,
-        "Check": check_note(fields),
+        "Check": check_note(fields, shift),
         "Source": post["uri"],
         "Queued": datetime.now(PACIFIC).strftime("%Y-%m-%d %H:%M"),
     }
