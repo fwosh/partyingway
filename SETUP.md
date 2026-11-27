@@ -210,6 +210,10 @@ it retries on the next run, no need to untick anything.
 says 5PM EST, the sheet holds `17:00` and `ET`, and Google Calendar shows
 2PM to you and 5PM to them.
 
+**`GMT` on a flier means Europe/London, not UTC.** EU hosts write GMT for
+their own clock, which is BST half the year — storing it as UTC puts those
+parties an hour late all summer. Only `ST` / `Server Time` is genuinely UTC.
+
 **Zone is a dropdown** — PT, MT, CT, ET, AKT, HT, UTC (Server Time), and a
 few European and Asian zones. You can also type: `PST`, `EST`, `Eastern`,
 `Server Time`, `BST` and full names like `Europe/Berlin` all resolve
@@ -219,7 +223,27 @@ zone, so `EST` in July still comes out right.
 **Status says `needs retry: ...`** = something failed mid-publish (API
 hiccup, network). It retries by itself.
 
-**To reject a submission**, leave Approve unticked. It stays on the sheet
+**Three actions, one tick each:**
+
+| Tick | What happens |
+|---|---|
+| **Approve** | Reposts from partyingway AND creates the calendar event |
+| **Repost only** | Reposts, creates NO calendar event |
+| **Archive** | Files the row away, does nothing else |
+
+**Repost only** is for regulars like CanvasAP and SeabunnyAP that already
+have a hand-maintained recurring event on the calendar. Approving one of
+those would put a duplicate alongside the recurring entry.
+
+If a row carries more than one tick, the least destructive wins: Archive,
+then Repost only, then Approve. A duplicate calendar event costs somebody a
+deletion; a missing one just means ticking the row again.
+
+**None of these undo anything.** Archive moves the row and nothing else — a
+repost that already went out stays up, and a calendar event that was already
+created stays on the calendar. Remove those by hand.
+
+**To reject a submission**, leave every box unticked. It stays on the sheet
 and is never published.
 
 **To get it out of your view**, tick **Archive**. The row moves to the

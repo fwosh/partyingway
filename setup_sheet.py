@@ -39,17 +39,18 @@ SKIPPED = rgb("#F3F4F6")   # not an event: present, but quiet
 LINK = rgb("#2563EB")
 
 WIDTHS = {  # pixels, by column name
-    "Approve": 80, "Status": 120, "Archive": 80, "Tag": 130, "Date": 100,
-    "Start": 80, "End": 80, "Zone": 210, "As written": 110, "Address": 250,
-    "Link": 170, "Flyer": 240, "Check": 200, "Source": 60, "Queued": 120,
+    "Approve": 72, "Repost only": 76, "Status": 118, "Archive": 72,
+    "Tag": 120, "Date": 100, "Start": 78, "End": 78, "Zone": 210,
+    "As written": 110, "Address": 240, "Link": 165, "Flyer": 240,
+    "Check": 230, "Source": 60, "Queued": 115,
 }
-CENTRED = ("Approve", "Archive", "Date", "Start", "End", "Queued")
+CENTRED = ("Approve", "Repost only", "Archive", "Date", "Start", "End", "Queued")
 # Column names that were called something else in an earlier layout. Used
 # only to recognise an existing sheet so its data doesn't get shifted.
 RENAMED_FROM = {"Start PT": "Start", "End PT": "End"}
 ROW_HEIGHT = int(os.environ.get("FLYER_ROW_HEIGHT", "240"))
 HEADER_HEIGHT = 44
-FROZEN_COLUMNS = 4              # the two checkboxes, Status and Tag stay put
+FROZEN_COLUMNS = 5              # the three actions, Status and Tag stay put
 STYLED_ROWS = 2000
 
 
@@ -256,6 +257,10 @@ def main():
             "rule": {"condition": {"type": "BOOLEAN"}, "showCustomUi": True},
         }},
         {"setDataValidation": {
+            "range": column("Repost only"),
+            "rule": {"condition": {"type": "BOOLEAN"}, "showCustomUi": True},
+        }},
+        {"setDataValidation": {
             "range": column("Archive"),
             "rule": {"condition": {"type": "BOOLEAN"}, "showCustomUi": True},
         }},
@@ -359,7 +364,8 @@ def main():
     for index, ranges, formula, colour in [
         # Published first, so a finished row doesn't also light up amber.
         (0, [data],
-         f'=AND({HAS_DATA},REGEXMATCH({ref("Status")}&"","^Posted"))', GREEN),
+         f'=AND({HAS_DATA},REGEXMATCH({ref("Status")}&"","^(Posted|Reposted)"))',
+         GREEN),
         # Not an art party: kept so the mention is never re-parsed, but
         # greyed so it doesn't read as work waiting to be done.
         (1, [data], f'=OR(AND({HAS_DATA},{ref("Status")}="Not an event"),'

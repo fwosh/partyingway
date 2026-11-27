@@ -268,19 +268,35 @@ def repost(session, subject):
 
 # ---------- main ----------
 
-def pending(row):
-    """Ticked and either never published or previously flagged, so fixing a
-    flagged cell is enough to make it retry.
+def action_for(row):
+    """Which of the three actions a row is asking for, or None.
 
-    Any other Status - "Posted ...", "Not an event", or anything a reviewer
-    typed by hand - takes the row out of consideration permanently. So does
-    the Archive box: filing something away should never also post it, even
-    if Approve was ticked first by mistake.
+    The boxes are separate so each is one click, which means a row can carry
+    more than one tick. Precedence runs least-destructive first:
+
+      Archive      file it, do nothing else
+      Repost only  repost, make NO calendar event
+      Approve      repost and create the calendar event
+
+    Repost only beats Approve deliberately. Regulars like CanvasAP already
+    have a hand-maintained recurring event, so the costly mistake is adding
+    a duplicate, not omitting one: a missing event is a row you tick again,
+    a duplicate is one somebody has to notice and delete.
     """
     if sheet.is_ticked(row, "Archive"):
-        return False
+        return None
     status = clean(row["Status"])
-    return sheet.is_ticked(row) and (not status or status.startswith("needs"))
+    if status and not status.startswith("needs"):
+        return None
+    if sheet.is_ticked(row, "Repost only"):
+        return "repost"
+    if sheet.is_ticked(row, "Approve"):
+        return "publish"
+    return None
+
+
+def pending(row):
+    return action_for(row) is not None
 
 
 def finished(row):
@@ -340,12 +356,47 @@ def main():
         sys.exit(f"PUBLISH_MODE should be 'calendar' or 'sheet', not {PUBLISH_MODE!r}")
 
     svc = sheet.service()
-    rows = [row for row in sheet.read_rows(svc) if pending(row)]
-    print(f"{len(rows)} row(s) ticked and waiting ({PUBLISH_MODE} mode)")
+    rows = [(row, action_for(row)) for row in sheet.read_rows(svc)]
+    rows = [(row, act) for row, act in rows if act]
+    counts = {a: sum(1 for _, x in rows if x == a) for a in ("publish", "repost")}
+    print(f"{len(rows)} row(s) ticked and waiting "
+          f"({counts['publish']} to publish, {counts['repost']} repost-only, "
+          f"{PUBLISH_MODE} mode)")
 
     session = None
-    for row in rows:
+    for row, action in rows:
         label = f"row {row['_row']} ({clean(row['Tag']) or 'untagged'})"
+
+        if action == "repost":
+            # No calendar event, so the date and time don't have to make
+            # sense - only the link matters.
+            if not clean(row["Link"]):
+                print(f"  {label}: needs link")
+                if not DRY_RUN:
+                    sheet.set_cell(row["_row"], "Status", "needs link", svc)
+                continue
+            if DRY_RUN:
+                print(f"  {label}: would repost only, no calendar event")
+                continue
+            subject = resolve_post(clean(row["Link"]))
+            if not subject:
+                print(f"  {label}: link isn't a Bluesky post")
+                sheet.set_cell(row["_row"], "Status",
+                               "needs a Bluesky link to repost", svc)
+                continue
+            session = session or create_session()
+            try:
+                repost(session, subject)
+            except Exception as exc:
+                print(f"  {label}: repost failed: {exc}")
+                sheet.set_cell(row["_row"], "Status",
+                               f"needs retry: {exc}"[:200], svc)
+                continue
+            status = f"Reposted {datetime.now(PACIFIC):%m-%d %H:%M} (no event)"
+            sheet.set_cell(row["_row"], "Status", status, svc)
+            print(f"  {label}: {status}")
+            continue
+
         try:
             start, end, zone_name = check(row)
         except RowProblem as problem:

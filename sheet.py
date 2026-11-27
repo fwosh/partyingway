@@ -21,21 +21,22 @@ ARCHIVE_TAB = os.environ.get("SHEET_ARCHIVE_TAB", "Archive")
 # Column order. The scripts address cells by these names, so if you rearrange
 # columns in the sheet, rearrange them here too (and re-run setup_sheet.py).
 COLUMNS = [
-    "Approve",      # A  checkbox: publish this one
-    "Status",       # B  written back by publish.py
-    "Archive",      # C  checkbox: file it away without publishing
-    "Tag",          # D
-    "Date",         # E  YYYY-MM-DD, Pacific
-    "Start",        # F  HH:MM in the host's own timezone, NOT converted
-    "End",          # G  HH:MM, optional
-    "Zone",         # H  IANA zone those times are in
-    "As written",   # I  the time exactly as the post worded it
-    "Address",      # J  FFXIV location
-    "Link",         # I  the post being advertised
-    "Flyer",        # J  =IMAGE() so the graphic shows in the sheet
-    "Check",        # K  blank unless the parser hit a real problem
-    "Source",       # N  AT-URI, the dedupe key
-    "Queued",       # O
+    "Approve",      # A  checkbox: repost AND put it on the calendar
+    "Repost only",  # B  checkbox: repost, but make no calendar event
+    "Status",       # C  written back by publish.py
+    "Archive",      # D  checkbox: file it away, doing nothing else
+    "Tag",          # E
+    "Date",         # F  YYYY-MM-DD
+    "Start",        # G  HH:MM in the host's own timezone, NOT converted
+    "End",          # H  HH:MM, optional
+    "Zone",         # I  IANA zone those times are in
+    "As written",   # J  the time exactly as the post worded it
+    "Address",      # K  FFXIV location
+    "Link",         # L  the post being advertised
+    "Flyer",        # M  =IMAGE() so the graphic shows in the sheet
+    "Check",        # N  blank unless the parser hit a real problem
+    "Source",       # O  AT-URI, the dedupe key
+    "Queued",       # P
 ]
 INDEX = {name: i for i, name in enumerate(COLUMNS)}
 LAST_COL = chr(ord("A") + len(COLUMNS) - 1)
@@ -231,8 +232,8 @@ ZONE_LABELS = [                       # (label, IANA) - dropdown order
     ("America/New_York (ET)", "America/New_York"),
     ("America/Anchorage (AKT)", "America/Anchorage"),
     ("Pacific/Honolulu (HT)", "Pacific/Honolulu"),
-    ("UTC (Server Time)", "UTC"),
-    ("Europe/London (GMT/BST)", "Europe/London"),
+    ("UTC (FFXIV Server Time)", "UTC"),
+    ("Europe/London (GMT/BST \u2014 EU parties)", "Europe/London"),
     ("Europe/Paris (CET)", "Europe/Paris"),
     ("Asia/Tokyo (JST)", "Asia/Tokyo"),
     ("Australia/Sydney (AET)", "Australia/Sydney"),
@@ -256,9 +257,13 @@ ZONE_ALIASES.update({
     "AKT": "America/Anchorage", "AKST": "America/Anchorage",
     "AKDT": "America/Anchorage",
     "HT": "Pacific/Honolulu", "HST": "Pacific/Honolulu",
+    # FFXIV Server Time really is UTC, and UTC never shifts. But a host
+    # writing "GMT" on a flier is an EU player meaning their own clock,
+    # which is BST for half the year - so that maps to Europe/London, not
+    # to UTC. Getting this backwards puts EU parties an hour out all summer.
     "ST": "UTC", "SERVER TIME": "UTC", "SERVERTIME": "UTC",
-    "UTC": "UTC", "GMT": "UTC", "ZULU": "UTC",
-    "BST": "Europe/London", "JST": "Asia/Tokyo",
+    "UTC": "UTC", "ZULU": "UTC",
+    "GMT": "Europe/London", "BST": "Europe/London", "JST": "Asia/Tokyo",
     "CET": "Europe/Paris", "CEST": "Europe/Paris",
     "AEST": "Australia/Sydney", "AEDT": "Australia/Sydney",
 })

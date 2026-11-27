@@ -191,6 +191,13 @@ EXTRACT_SCHEMA = {
                                 "convert it to anywhere else. '5pm EST' is '17:00'.")},
             "end_local": {"type": "string",
                 "description": "End time, same timezone, 24h HH:MM. Empty if none given."},
+            "recurrence": {"type": "string",
+                "description": ("If the post says this party happens on a repeating "
+                                "schedule, describe it in the post's own words - "
+                                "'weekly', 'every other Sunday', 'first Friday "
+                                "monthly', 'bimonthly'. EMPTY STRING for a one-off. "
+                                "A post advertising one date of a known series still "
+                                "counts: say so if the post mentions the series.")},
             "warning": {"type": "string",
                 "description": ("EMPTY STRING unless something is genuinely wrong. Only "
                                 "fill this when the post text and the graphic disagree, "
@@ -200,7 +207,8 @@ EXTRACT_SCHEMA = {
                                 "already shows that.")},
         },
         "required": ["is_art_party", "tag", "address", "date", "time_as_written",
-                     "timezone", "start_local", "end_local", "warning"],
+                     "timezone", "start_local", "end_local", "recurrence",
+                     "warning"],
     },
 }
 
@@ -233,7 +241,10 @@ ET, America/Chicago for CT, America/Denver for MT, America/Los_Angeles for \
 PT, Europe/London for GMT/BST, Asia/Tokyo for JST. Use the IANA name, not \
 the abbreviation, and don't worry about daylight saving: the IANA zone \
 already handles it for whatever date the event falls on.
-- "ST" or "Server Time" means UTC. Always.
+- "ST" or "Server Time" means FFXIV Server Time, which is UTC. Always.
+- "GMT" on a flier is almost always an EU host meaning their own clock, \
+which is BST for half the year - so that is Europe/London, NOT UTC. Only \
+use UTC when the post says Server Time or ST.
 - If the post gives a time with NO zone at all, leave timezone as an EMPTY \
 STRING. Do not guess, and do not assume the host posts from their own \
 country. A human will resolve it.
@@ -243,6 +254,12 @@ check you read it correctly.
 DATES: "Saturday" or "Nov 30" with no year means the next future occurrence \
 relative to the current date below. If that lands more than 90 days out, say \
 so in notes.
+
+RECURRING PARTIES: many hosts run a regular series and post a fresh flier \
+for each session. If the post mentions any repeating schedule, put it in \
+recurrence. Do not try to work out future dates - just report the date this \
+particular post is advertising, and describe the pattern in recurrence so a \
+human can decide what to do about it.
 
 Never invent a detail that isn't present. Leave any field you cannot \
 determine as an empty string - that is correct and useful, whereas a \
@@ -314,6 +331,24 @@ def parse_post(post, followups=()):
 
 # ---------- rows ----------
 
+def check_note(fields):
+    """What the reviewer needs flagged, recurrence first.
+
+    A repeating party usually already has a hand-maintained event on the
+    calendar, so publishing this one would duplicate it. Saying so here is
+    what stops that happening.
+    """
+    parts = []
+    repeats = (fields.get("recurrence") or "").strip()
+    if repeats:
+        parts.append(f"repeats {repeats} - use Repost only if it's already "
+                     f"on the calendar")
+    warning = (fields.get("warning") or "").strip()
+    if warning:
+        parts.append(warning)
+    return "; ".join(parts)
+
+
 def build_row(fields, post, link):
     images = post_images(post)
     flyer = f'=IMAGE("{images[0]["url"]}", 1)' if images else ""
@@ -330,7 +365,7 @@ def build_row(fields, post, link):
         "Address": fields.get("address") or "",
         "Link": link,
         "Flyer": flyer,
-        "Check": fields.get("warning") or "",
+        "Check": check_note(fields),
         "Source": post["uri"],
         "Queued": datetime.now(PACIFIC).strftime("%Y-%m-%d %H:%M"),
     }
@@ -397,8 +432,9 @@ def main():
                   f"zone={fields.get('timezone') or '-'}")
             print(f"    as written: {fields.get('time_as_written') or '-'}")
             print(f"    address: {fields.get('address') or '-'}")
-            if fields.get("warning"):
-                print(f"    check: {fields['warning']}")
+            note = check_note(fields)
+            if note:
+                print(f"    check: {note}")
             if row["Status"]:
                 print(f"    -> {row['Status']}")
             continue
